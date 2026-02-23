@@ -267,17 +267,17 @@ pub const Cpu = struct {
                 self.pc +%= 4;
             },
             0b0010111 => { // AUIPC
-                self.regs[inst.rd()] = self.pc + inst.u_imm();
+                self.regs[inst.rd()] = self.pc +% inst.u_imm();
                 self.pc +%= 4;
             },
             0b1101111 => { // JAL
-                self.regs[inst.rd()] = self.pc + 4;
+                self.regs[inst.rd()] = self.pc +% 4;
                 const imm: u32 = @bitCast(inst.signed_j_imm());
                 self.pc +%= imm;
             },
             0b1100111 => switch (inst.funct3()) {
                 0b000 => { // JALR
-                    self.regs[inst.rd()] = self.pc + 4;
+                    self.regs[inst.rd()] = self.pc +% 4;
                     const imm: u32 = @bitCast(inst.signed_i_imm());
                     self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
                 },
@@ -395,11 +395,13 @@ pub const Cpu = struct {
                 0b010 => { // SLTI
                     const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
                     self.regs[inst.rd()] = if (rs1 < inst.signed_i_imm()) 1 else 0;
+                    self.pc +%= 4;
                 },
                 0b011 => { // SLTIU
                     const rs1 = self.regs[inst.rs1()];
                     const imm: u32 = @bitCast(inst.signed_i_imm());
                     self.regs[inst.rd()] = if (rs1 < imm) 1 else 0;
+                    self.pc +%= 4;
                 },
                 0b100 => { // XORI
                     const imm: u32 = @bitCast(inst.signed_i_imm());
@@ -460,6 +462,7 @@ pub const Cpu = struct {
                         const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
                         const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
                         self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                        self.pc +%= 4;
                     },
                     else => return .invalid_inst,
                 },
@@ -468,6 +471,7 @@ pub const Cpu = struct {
                         const rs1 = self.regs[inst.rs1()];
                         const rs2 = self.regs[inst.rs2()];
                         self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                        self.pc +%= 4;
                     },
                     else => return .invalid_inst,
                 },
@@ -581,6 +585,9 @@ pub const Cpu = struct {
             },
             0b0001111 => switch (inst.funct3()) {
                 0b000 => { // FENCE
+                    self.pc +%= 4;
+                },
+                0b001 => { // FENCEI
                     self.pc +%= 4;
                 },
                 else => return .invalid_inst,

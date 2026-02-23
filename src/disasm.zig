@@ -244,6 +244,7 @@ pub fn inst_op(inst: Inst) ?Opcode {
         },
         0b0001111 => switch (inst.funct3()) {
             0b000 => .FENCE,
+            0b001 => .FENCEI,
             else => null,
         },
         else => null,

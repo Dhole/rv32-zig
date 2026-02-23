@@ -10,7 +10,7 @@ const disasm = @import("disasm.zig");
 const InstFmt = disasm.InstFmt;
 
 fn test_cpu_init(allocator: Allocator) !Cpu {
-    const mem = try Memory.init(allocator, 0x80000000, 0x8000, 0x80002000, 4096);
+    const mem = try Memory.init(allocator, 0x80000000, 0x8000, 0x80001000, 0x8000);
     return Cpu.init(mem);
 }
 
@@ -40,8 +40,8 @@ fn test_exec_bin(allocator: Allocator, bin_path: []u8) !Cpu {
     while (i < 0x1000) : (i += 1) {
         const word = cpu.mem.read(u32, cpu.pc);
         const inst = Inst.init(word);
-        std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
-        std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
+        // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
+        // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
         const opt_trap = cpu.exec(inst);
         if (opt_trap) |trap| {
             if (trap == .ecall) {
@@ -58,12 +58,54 @@ test "rv32ui" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    var cpu = try test_cpu_init(allocator);
-    defer cpu.deinit();
+    const ops_str = [_][]const u8{
+        "add",
+        "addi",
+        "and",
+        "andi",
+        "auipc",
+        "beq",
+        "bge",
+        "bgeu",
+        "blt",
+        "bltu",
+        "bne",
+        "fence_i",
+        "jal",
+        "jalr",
+        "lb",
+        "lbu",
+        "ld_st",
+        "lh",
+        "lhu",
+        "lui",
+        "lw",
+        "ma_data",
+        "or",
+        "ori",
+        "sb",
+        "sh",
+        "simple",
+        "sll",
+        "slli",
+        "slt",
+        "slti",
+        "sltiu",
+        "sltu",
+        "sra",
+        "srai",
+        "srl",
+        "srli",
+        "st_ld",
+        "sub",
+        "sw",
+        "xor",
+        "xori",
+    };
+    for (ops_str) |op_str| {
+        std.debug.print("> {s}\n", .{op_str});
+        const bin_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ui-p-{s}.bin", .{op_str});
 
-    const op_str = "add";
-    std.debug.print("> {s}\n", .{op_str});
-    const bin_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ui-p-{s}.bin", .{op_str});
-
-    _ = try test_exec_bin(allocator, bin_path);
+        _ = try test_exec_bin(allocator, bin_path);
+    }
 }
