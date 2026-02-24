@@ -37,6 +37,7 @@ pub const Inst = packed struct {
             imm0_4: u5,
             funct3: u3,
             rs1: u5,
+            rs2: u5,
             imm5_11: u7,
         };
         const UType = packed struct {
@@ -277,9 +278,10 @@ pub const Cpu = struct {
             },
             0b1100111 => switch (inst.funct3()) {
                 0b000 => { // JALR
-                    self.regs[inst.rd()] = self.pc +% 4;
+                    const next = self.pc +% 4;
                     const imm: u32 = @bitCast(inst.signed_i_imm());
                     self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
+                    self.regs[inst.rd()] = next;
                 },
                 else => return .invalid_inst,
             },
@@ -371,17 +373,17 @@ pub const Cpu = struct {
             0b0100011 => switch (inst.funct3()) {
                 0b000 => { // SB
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs1()]));
+                    self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
                     self.pc +%= 4;
                 },
                 0b001 => { // SH
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs1()]));
+                    self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
                     self.pc +%= 4;
                 },
                 0b010 => { // SW
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs1()]);
+                    self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
                     self.pc +%= 4;
                 },
                 else => return .invalid_inst,
@@ -448,11 +450,22 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = self.regs[inst.rs1()] -% self.regs[inst.rs2()];
                         self.pc +%= 4;
                     },
+                    0b0000001 => { // MUL
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] *% self.regs[inst.rs2()];
+                        self.pc +%= 4;
+                    },
                     else => return .invalid_inst,
                 },
                 0b001 => switch (inst.funct7()) {
                     0b0000000 => { // SLL
                         self.regs[inst.rd()] = self.regs[inst.rs1()] << @truncate(self.regs[inst.rs2()]);
+                        self.pc +%= 4;
+                    },
+                    0b0000001 => { // MULH
+                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                        const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                        const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, rs2));
+                        self.regs[inst.rd()] = @truncate(rd >> 32);
                         self.pc +%= 4;
                     },
                     else => return .invalid_inst,
@@ -464,6 +477,13 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
                         self.pc +%= 4;
                     },
+                    0b0000001 => { // MULHSU
+                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                        const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, self.regs[inst.rs2()]));
+                        self.regs[inst.rd()] = @truncate(rd >> 32);
+                        self.pc +%= 4;
+                        self.pc +%= 4;
+                    },
                     else => return .invalid_inst,
                 },
                 0b011 => switch (inst.funct7()) {
@@ -473,11 +493,30 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
                         self.pc +%= 4;
                     },
+                    0b0000001 => { // MULHU
+                        const rs1 = self.regs[inst.rs1()];
+                        const rs2 = self.regs[inst.rs2()];
+                        self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
+                        self.pc +%= 4;
+                        self.pc +%= 4;
+                        self.pc +%= 4;
+                    },
                     else => return .invalid_inst,
                 },
                 0b100 => switch (inst.funct7()) {
                     0b0000000 => { // XOR
                         self.regs[inst.rd()] = self.regs[inst.rs1()] ^ self.regs[inst.rs2()];
+                        self.pc +%= 4;
+                    },
+                    0b0000001 => { // DIV
+                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                        const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                            @bitCast(@as(i32, -1))
+                        else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
+                            @bitCast(@as(i32, std.math.minInt(i32)))
+                        else
+                            @bitCast(@divTrunc(rs1, rs2));
                         self.pc +%= 4;
                     },
                     else => return .invalid_inst,
@@ -492,6 +531,14 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = @bitCast(rs1 >> @truncate(self.regs[inst.rs2()]));
                         self.pc +%= 4;
                     },
+                    0b0000001 => { // DIVU
+                        const rs2 = self.regs[inst.rs2()];
+                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                            ~@as(u32, 0)
+                        else
+                            self.regs[inst.rs1()] / rs2;
+                        self.pc +%= 4;
+                    },
                     else => return .invalid_inst,
                 },
                 0b110 => switch (inst.funct7()) {
@@ -499,11 +546,31 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = self.regs[inst.rs1()] | self.regs[inst.rs2()];
                         self.pc +%= 4;
                     },
+                    0b0000001 => { // REM
+                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                        const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                            @bitCast(rs1)
+                        else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
+                            @as(u32, 0)
+                        else
+                            @bitCast(@rem(rs1, rs2));
+                        self.pc +%= 4;
+                    },
                     else => return .invalid_inst,
                 },
                 0b111 => switch (inst.funct7()) {
                     0b0000000 => { // AND
-                        self.regs[inst.rd()] &= self.regs[inst.rs1()];
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] & self.regs[inst.rs2()];
+                        self.pc +%= 4;
+                    },
+                    0b0000001 => { // REMU
+                        const rs2 = self.regs[inst.rs2()];
+                        const rs1 = self.regs[inst.rs1()];
+                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                            rs1
+                        else
+                            rs1 % rs2;
                         self.pc +%= 4;
                     },
                     else => return .invalid_inst,

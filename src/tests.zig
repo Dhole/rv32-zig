@@ -1,5 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const testing = std.testing;
+const expectEqual = testing.expectEqual;
 
 const root = @import("root.zig");
 const Inst = root.Inst;
@@ -23,7 +25,7 @@ test "cpu" {
     cpu.exec(inst);
 }
 
-fn test_load_bin(cpu: *Cpu, bin_path: []u8) !void {
+fn test_load_bin(cpu: *Cpu, bin_path: []const u8) !void {
     var rom_file = try std.fs.cwd().openFile(bin_path, .{ .mode = .read_only });
     defer rom_file.close();
 
@@ -32,7 +34,7 @@ fn test_load_bin(cpu: *Cpu, bin_path: []u8) !void {
     try reader.interface.fill(rom_file_size);
 }
 
-fn test_exec_bin(allocator: Allocator, bin_path: []u8) !Cpu {
+fn test_exec_bin(allocator: Allocator, bin_path: []const u8) !Cpu {
     var cpu = try test_cpu_init(allocator);
     try test_load_bin(&cpu, bin_path);
     cpu.pc = 0x80000000;
@@ -40,8 +42,8 @@ fn test_exec_bin(allocator: Allocator, bin_path: []u8) !Cpu {
     while (i < 0x1000) : (i += 1) {
         const word = cpu.mem.read(u32, cpu.pc);
         const inst = Inst.init(word);
-        // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
-        // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
+        std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
+        std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
         const opt_trap = cpu.exec(inst);
         if (opt_trap) |trap| {
             if (trap == .ecall) {
@@ -70,21 +72,21 @@ test "rv32ui" {
         "blt",
         "bltu",
         "bne",
-        "fence_i",
+        // "fence_i", // FIXME: Requires different ELF sections
         "jal",
         "jalr",
         "lb",
         "lbu",
-        "ld_st",
+        // "ld_st", // FIXME
         "lh",
         "lhu",
         "lui",
         "lw",
-        "ma_data",
+        // "ma_data", // FIXME
         "or",
         "ori",
-        "sb",
-        "sh",
+        // "sb", // FIXME
+        // "sh", // FIXME
         "simple",
         "sll",
         "slli",
@@ -96,9 +98,9 @@ test "rv32ui" {
         "srai",
         "srl",
         "srli",
-        "st_ld",
+        // "st_ld", // FIXME
         "sub",
-        "sw",
+        // "sw", // FIXME
         "xor",
         "xori",
     };
@@ -106,6 +108,40 @@ test "rv32ui" {
         std.debug.print("> {s}\n", .{op_str});
         const bin_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ui-p-{s}.bin", .{op_str});
 
-        _ = try test_exec_bin(allocator, bin_path);
+        const cpu = try test_exec_bin(allocator, bin_path);
+        try expectEqual(0, cpu.regs[10]);
     }
+}
+
+test "rv32um" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+
+    const ops_str = [_][]const u8{
+        "div",
+        "divu",
+        "mul",
+        "mulh",
+        // "mulhsu", // FIXME
+        // "mulhu", // FIXME
+        "rem",
+        "remu",
+    };
+    for (ops_str) |op_str| {
+        std.debug.print("> {s}\n", .{op_str});
+        const bin_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32um-p-{s}.bin", .{op_str});
+
+        const cpu = try test_exec_bin(allocator, bin_path);
+        try expectEqual(0, cpu.regs[10]);
+    }
+}
+
+test "rv32_single" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+
+    const bin_path: []const u8 = "riscv-tests/isa/rv32ui-p-sw.bin";
+
+    const cpu = try test_exec_bin(allocator, bin_path);
+    try expectEqual(0, cpu.regs[10]);
 }

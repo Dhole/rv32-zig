@@ -65,6 +65,16 @@ const Opcode = enum {
     ECALL,
     EBREAK,
 
+    // M
+    DIV,
+    DIVU,
+    MUL,
+    MULH,
+    MULHSU,
+    MULHU,
+    REM,
+    REMU,
+
     // "Zicsr", Control and Status Register (CSR) Instructions, Version 2.0
     CSRRW,
     CSRRS,
@@ -124,6 +134,14 @@ const Opcode = enum {
             .FENCE => "fence",
             .ECALL => "ecall",
             .EBREAK => "ebreak",
+            .DIV => "div",
+            .DIVU => "divu",
+            .MUL => "mul",
+            .MULH => "mulh",
+            .MULHSU => "mulhsu",
+            .MULHU => "mulhu",
+            .REM => "rem",
+            .REMU => "remu",
             .CSRRW => "csrrw",
             .CSRRS => "csrrs",
             .CSRRC => "csrrc",
@@ -192,35 +210,43 @@ pub fn inst_op(inst: Inst) ?Opcode {
             0b000 => switch (inst.funct7()) {
                 0b0000000 => .ADD,
                 0b0100000 => .SUB,
+                0b0000001 => .MUL,
                 else => null,
             },
             0b001 => switch (inst.funct7()) {
                 0b0000000 => .SLL,
+                0b0000001 => .MULH,
                 else => null,
             },
             0b010 => switch (inst.funct7()) {
                 0b0000000 => .SLT,
+                0b0000001 => .MULHSU,
                 else => null,
             },
             0b011 => switch (inst.funct7()) {
                 0b0000000 => .SLTU,
+                0b0000001 => .MULHU,
                 else => null,
             },
             0b100 => switch (inst.funct7()) {
                 0b0000000 => .XOR,
+                0b0000001 => .DIV,
                 else => null,
             },
             0b101 => switch (inst.funct7()) {
                 0b0000000 => .SRL,
                 0b0100000 => .SRA,
+                0b0000001 => .DIVU,
                 else => null,
             },
             0b110 => switch (inst.funct7()) {
                 0b0000000 => .OR,
+                0b0000001 => .REM,
                 else => null,
             },
             0b111 => switch (inst.funct7()) {
                 0b0000000 => .AND,
+                0b0000001 => .REMU,
                 else => null,
             },
         },
@@ -259,17 +285,7 @@ pub fn inst_format(w: *Writer, addr: u32, inst: Inst) !void {
     try w.print("{s}", .{op.str()});
     switch (op) {
         // R-Type
-        .ADD,
-        .SUB,
-        .SLL,
-        .SLT,
-        .SLTU,
-        .XOR,
-        .SRL,
-        .SRA,
-        .OR,
-        .AND,
-        => {
+        .ADD, .SUB, .SLL, .SLT, .SLTU, .XOR, .SRL, .SRA, .OR, .AND, .DIV, .DIVU, .MUL, .MULH, .MULHSU, .MULHU, .REM, .REMU => {
             try w.print(" {s}, {s}, {s}", .{ reg[inst.rd()], reg[inst.rs1()], reg[inst.rs2()] });
         },
         // I-Type
