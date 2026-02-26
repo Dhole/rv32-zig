@@ -163,8 +163,8 @@ test "rv32um" {
         "divu",
         "mul",
         "mulh",
-        // "mulhsu", // FIXME
-        // "mulhu", // FIXME
+        "mulhsu",
+        "mulhu",
         "rem",
         "remu",
     };
@@ -181,7 +181,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32ui-p-ld_st";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32um-p-mulhu";
 
     const cpu = try test_exec_elf(allocator, elf_path);
     try expectEqual(0, cpu.regs[10]);

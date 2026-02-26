@@ -482,7 +482,6 @@ pub const Cpu = struct {
                         const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, self.regs[inst.rs2()]));
                         self.regs[inst.rd()] = @truncate(rd >> 32);
                         self.pc +%= 4;
-                        self.pc +%= 4;
                     },
                     else => return .invalid_inst,
                 },
@@ -497,8 +496,6 @@ pub const Cpu = struct {
                         const rs1 = self.regs[inst.rs1()];
                         const rs2 = self.regs[inst.rs2()];
                         self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
-                        self.pc +%= 4;
-                        self.pc +%= 4;
                         self.pc +%= 4;
                     },
                     else => return .invalid_inst,
