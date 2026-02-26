@@ -135,6 +135,34 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    // Module to run tests from official "riscv-tests"
+    const riscv_tests_mod = b.createModule(.{
+        .root_source_file = b.path("src/riscv_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const test_filters: []const []const u8 = b.option(
+        []const []const u8,
+        "test-filter",
+        "Skip tests that do not match any of the specified filters",
+    ) orelse &.{};
+    const exe_riscv_tests = b.addTest(.{
+        .root_module = riscv_tests_mod,
+        .filters = test_filters,
+    });
+    const elfy = b.dependency("elfy", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_riscv_tests.root_module.addImport("elfy", elfy.module("elfy"));
+    const run_exe_riscv_tests = b.addRunArtifact(exe_riscv_tests);
+    if (b.args) |args| {
+        run_exe_riscv_tests.addArgs(args);
+    }
+
+    const riscv_tests_step = b.step("riscv-tests", "Run riscv-tests");
+    riscv_tests_step.dependOn(&run_exe_riscv_tests.step);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.

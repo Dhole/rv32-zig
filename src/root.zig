@@ -177,14 +177,14 @@ pub fn buf_write(comptime T: type, buf: []u8, addr: u32, v: T) void {
             buf[addr] = @truncate(v);
         },
         u16 => {
-            buf[addr + 0] = @truncate((v & 0x00ff) >> 0);
-            buf[addr + 1] = @truncate((v & 0xff00) >> 8);
+            buf[addr + 0] = @truncate(v >> 0);
+            buf[addr + 1] = @truncate(v >> 8);
         },
         u32 => {
-            buf[addr + 0] = @truncate((v & 0x000000ff) >> 0);
-            buf[addr + 1] = @truncate((v & 0x0000ff00) >> 8);
-            buf[addr + 2] = @truncate((v & 0x00ff0000) >> 16);
-            buf[addr + 3] = @truncate((v & 0xff000000) >> 24);
+            buf[addr + 0] = @truncate(v >> 0);
+            buf[addr + 1] = @truncate(v >> 8);
+            buf[addr + 2] = @truncate(v >> 16);
+            buf[addr + 3] = @truncate(v >> 24);
         },
         else => @compileError("invalid T"),
     }
