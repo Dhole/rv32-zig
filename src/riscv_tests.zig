@@ -16,15 +16,20 @@ const InstFmt = disasm.InstFmt;
 const debug = @import("debug.zig");
 const MemoryFmt = debug.MemoryFmt;
 
-fn test_cpu_init(allocator: Allocator) !Cpu {
-    const mem = try Memory.init(allocator, 0x80000000, 0x1000, 0x80001000, 0x8000);
+fn test_cpu_init(allocator: Allocator, config: []const u8) !Cpu {
+    const mem = if (std.mem.eql(u8, config, "a"))
+        try Memory.init(allocator, 0x80000000, 0x1000, 0x80001000, 0x8000)
+    else if (std.mem.eql(u8, config, "b"))
+        try Memory.init(allocator, 0x80000000, 0x2000, 0x80002000, 0x8000)
+    else
+        @panic("Invalid config");
     return Cpu.init(mem);
 }
 
 test "cpu" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
-    var cpu = try test_cpu_init(allocator);
+    var cpu = try test_cpu_init(allocator, "a");
     defer cpu.deinit();
     const inst = Inst.init(0b0000000_00011_00010_000_00001_0110011);
     _ = cpu.exec(inst);
@@ -66,7 +71,11 @@ fn test_load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
 }
 
 fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
-    var cpu = try test_cpu_init(allocator);
+    const mem_config = if (std.mem.containsAtLeast(u8, elf_path, 1, "ld_st"))
+        "b"
+    else
+        "a";
+    var cpu = try test_cpu_init(allocator, mem_config);
     try test_load_elf(allocator, &cpu, elf_path);
     // std.debug.print("RAM:\n{f}", .{MemoryFmt{ .mem = &cpu.mem, .offset = 0x80001000, .size = 0x100 }});
 
@@ -109,16 +118,16 @@ test "rv32ui" {
         "jalr",
         "lb",
         "lbu",
-        // "ld_st", // FIXME
+        "ld_st",
         "lh",
         "lhu",
         "lui",
         "lw",
-        "ma_data", // FIXME
+        "ma_data",
         "or",
         "ori",
-        "sb", // FIXME
-        "sh", // FIXME
+        "sb",
+        "sh",
         "simple",
         "sll",
         "slli",
@@ -130,9 +139,9 @@ test "rv32ui" {
         "srai",
         "srl",
         "srli",
-        "st_ld", // FIXME
+        "st_ld",
         "sub",
-        "sw", // FIXME
+        "sw",
         "xor",
         "xori",
     };
@@ -181,7 +190,7 @@ test "rv32_single" {
 test "elfy" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
-    const elf_path: []const u8 = "riscv-tests/isa/rv32ui-p-sw";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32ui-p-ld_st";
     var binary = try elfy.Elf.init(elf_path, .ReadOnly, allocator);
     defer binary.deinit();
 
