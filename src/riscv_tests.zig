@@ -53,16 +53,16 @@ fn test_load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
         }
         const vaddr = segment.getVirtualAddress();
         const vsize = segment.getMemorySize();
-        const size = segment.getFileSize();
-        try expectEqual(size, vsize);
         const flags = segment.getFlags();
         if (!flags.write() & ((rom_addr <= vaddr) & (vaddr + vsize <= rom_addr + rom_size))) {
             const data = try elf.getProgramData(segment);
             const offset = vaddr - rom_addr;
+            @memset(cpu.mem.rom[offset .. offset + vsize], 0);
             @memcpy(cpu.mem.rom[offset .. offset + data.len], data);
         } else if (flags.write() & ((ram_addr <= vaddr) & (vaddr + vsize <= ram_addr + ram_size))) {
             const data = try elf.getProgramData(segment);
             const offset = vaddr - ram_addr;
+            @memset(cpu.mem.ram[offset .. offset + vsize], 0);
             @memcpy(cpu.mem.ram[offset .. offset + data.len], data);
         } else {
             std.debug.panic("Unexpected segment config", .{});
@@ -83,8 +83,8 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
     while (i < 0x1000) : (i += 1) {
         const word = cpu.mem.read(u32, cpu.pc);
         const inst = Inst.init(word);
-        // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
-        // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
+        std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
+        std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
         const opt_trap = cpu.exec(inst);
         if (opt_trap) |trap| {
             if (trap == .ecall) {
@@ -177,11 +177,36 @@ test "rv32um" {
     }
 }
 
+test "rv32ua" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+
+    const ops_str = [_][]const u8{
+        "amoadd_w",
+        "amoand_w",
+        "amomaxu_w",
+        "amomax_w",
+        "amominu_w",
+        "amomin_w",
+        "amoor_w",
+        "amoswap_w",
+        "amoxor_w",
+        "lrsc",
+    };
+    for (ops_str) |op_str| {
+        std.debug.print("> {s}\n", .{op_str});
+        const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ua-p-{s}", .{op_str});
+
+        const cpu = try test_exec_elf(allocator, elf_path);
+        try expectEqual(0, cpu.regs[10]);
+    }
+}
+
 test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32um-p-mulhu";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32ua-p-amoadd_w";
 
     const cpu = try test_exec_elf(allocator, elf_path);
     try expectEqual(0, cpu.regs[10]);
