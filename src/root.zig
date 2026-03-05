@@ -204,7 +204,7 @@ pub fn buf_write(comptime T: type, buf: []u8, addr: u32, v: T) void {
     }
 }
 
-pub const Memory = struct {
+pub const BasicMemory = struct {
     allocator: Allocator,
     rom_offset: u32,
     rom: []u8,
@@ -291,12 +291,13 @@ pub const MTVec = packed struct {
     mode: Mode,
     base: u30,
 
-    fn address(self: *MTVec) u32 {
+    fn address(self: *const MTVec) u32 {
         return @as(u32, self.base) << 2;
     }
 };
 
 const ExceptionCode = enum(u31) {
+    inst_access_fault = 1,
     illegal_inst = 2,
     load_access_fault = 5,
     store_amo_access_fault = 7,
@@ -412,531 +413,587 @@ const CSR_MEPC: u32 = 0x341;
 const CSR_MCAUSE: u32 = 0x342;
 const CSR_MTVEC: u32 = 0x303;
 
-pub const Cpu = struct {
-    regs: [32]u32,
-    pc: u32,
-    priv_mode: PrivilegeMode,
-    csr: Csr,
-    mem: Memory,
+pub const basic_config = Config{
+    .mem_type = BasicMemory,
+};
 
-    const Self = @This();
+pub const BasicCpu = Cpu(basic_config);
 
-    pub fn init(mem: Memory) Self {
-        return .{
-            .regs = .{0} ** 32,
-            .pc = 0,
-            .priv_mode = .M,
-            .csr = Csr.init(),
-            .mem = mem,
-        };
-    }
+pub fn MemoryInterface(comptime M: type) type {
+    return struct {
+        inner: M,
+        const Self = @This();
+        pub fn read(self: *Self, comptime T: type, addr: u32) !T {
+            return self.inner.read(T, addr);
+        }
+        pub fn write(self: *Self, comptime T: type, addr: u32, v: T) !void {
+            return self.inner.write(T, addr, v);
+        }
+        pub fn deinit(self: *Self) void {
+            self.inner.deinit();
+        }
+    };
+}
 
-    pub fn deinit(self: *Self) void {
-        self.mem.deinit();
-    }
+pub const Config = struct {
+    mem_type: type,
+};
 
-    pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
-        self.csr.regs[Csr.MEPC] = self.pc;
-        self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
-        // Set MTVAL to 0?
-        var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
-        mstatus.mpp = @intFromEnum(self.priv_mode);
-        mstatus.mpie = mstatus.mie;
-        mstatus.mie = 0;
-        self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
-        const mtvec: MTVec = @bitCast(self.csr.regs[Csr.MTVEC]);
-        self.pc = mtvec.address();
-    }
+pub fn Cpu(comptime cfg: Config) type {
+    const Memory = MemoryInterface(cfg.mem_type);
+    return struct {
+        regs: [32]u32,
+        pc: u32,
+        priv_mode: PrivilegeMode,
+        csr: Csr,
+        mem: Memory,
 
-    pub fn exec(self: *Self, inst: Inst) ?ExceptionCode {
-        self.exec_err(inst) catch |err| {
-            return switch (err) {
-                error.read_invalid_addr => .load_access_fault,
-                error.write_invalid_addr => .store_amo_access_fault,
-                error.unk_inst => .illegal_inst,
-                error.csr_read_priv => .illegal_inst,
-                error.csr_write_priv => .illegal_inst,
-                error.csr_write_ro => .illegal_inst,
-                error.ecall => switch (self.priv_mode) {
-                    .M => .env_call_from_m_mode,
-                    .U => .env_call_from_u_mode,
-                    else => @panic("Unsupported"),
-                },
+        const Self = @This();
+
+        pub fn init(mem: cfg.mem_type) Self {
+            return .{
+                .regs = .{0} ** 32,
+                .pc = 0,
+                .priv_mode = .M,
+                .csr = Csr.init(),
+                .mem = Memory{ .inner = mem },
             };
-        };
-        return null;
-    }
+        }
 
-    fn exec_err(self: *Self, inst: Inst) !void {
-        switch (inst.opcode()) {
-            0b0110111 => { // LUI
-                self.regs[inst.rd()] = inst.u_imm();
-                self.pc +%= 4;
-            },
-            0b0010111 => { // AUIPC
-                self.regs[inst.rd()] = self.pc +% inst.u_imm();
-                self.pc +%= 4;
-            },
-            0b1101111 => { // JAL
-                self.regs[inst.rd()] = self.pc +% 4;
-                const imm: u32 = @bitCast(inst.signed_j_imm());
-                self.pc +%= imm;
-            },
-            0b1100111 => switch (inst.funct3()) {
-                0b000 => { // JALR
-                    const next = self.pc +% 4;
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
-                    self.regs[inst.rd()] = next;
-                },
-                else => return error.unk_inst,
-            },
-            0b1100011 => switch (inst.funct3()) {
-                0b000 => { // BEQ
-                    if (self.regs[inst.rs1()] == self.regs[inst.rs2()]) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                0b001 => { // BNE
-                    if (self.regs[inst.rs1()] != self.regs[inst.rs2()]) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                0b100 => { // BLT
-                    const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                    const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                    if (rs1 < rs2) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                0b101 => { // BGE
-                    const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                    const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                    if (rs1 >= rs2) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                0b110 => { // BLTU
-                    if (self.regs[inst.rs1()] < self.regs[inst.rs2()]) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                0b111 => { // BGEU
-                    if (self.regs[inst.rs1()] >= self.regs[inst.rs2()]) {
-                        const imm: u32 = @bitCast(inst.signed_b_imm());
-                        self.pc +%= imm;
-                    } else {
-                        self.pc +%= 4;
-                    }
-                },
-                else => return error.unk_inst,
-            },
-            0b0000011 => switch (inst.funct3()) {
-                0b000 => { // LB
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    const v: i8 = @bitCast(try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
-                    self.regs[inst.rd()] = @bitCast(@as(i32, v));
+        pub fn deinit(self: *Self) void {
+            self.mem.deinit();
+        }
+
+        pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
+            self.csr.regs[Csr.MEPC] = self.pc;
+            self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
+            // Set MTVAL to 0?
+            var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+            mstatus.mpp = @intFromEnum(self.priv_mode);
+            mstatus.mpie = mstatus.mie;
+            mstatus.mie = 0;
+            self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
+            const mtvec: MTVec = @bitCast(self.csr.regs[Csr.MTVEC]);
+            self.pc = mtvec.address();
+        }
+
+        pub fn step_debug(self: *Self) struct { ?Inst, ?ExceptionCode } {
+            var opt_inst: ?Inst = null;
+            const opt_exception: ?ExceptionCode = if (self.mem.read(u32, self.pc)) |word| blk: {
+                const inst = Inst.init(word);
+                opt_inst = inst;
+                break :blk self.exec(inst);
+            } else |err| switch (err) {
+                error.read_invalid_addr => .inst_access_fault,
+            };
+            if (opt_exception) |exception| {
+                self.handle_exception(exception);
+            }
+            return .{ opt_inst, opt_exception };
+        }
+
+        pub fn step(self: *Self) void {
+            const opt_exception: ?ExceptionCode = if (self.mem.read(u32, self.pc)) |word| blk: {
+                const inst = Inst.init(word);
+                break :blk self.exec(inst);
+            } else |err| switch (err) {
+                error.read_invalid_addr => .inst_access_fault,
+            };
+            if (opt_exception) |exception| {
+                self.handle_exception(exception);
+            }
+        }
+
+        pub fn exec(self: *Self, inst: Inst) ?ExceptionCode {
+            self.exec_err(inst) catch |err| {
+                return switch (err) {
+                    error.read_invalid_addr => .load_access_fault,
+                    error.write_invalid_addr => .store_amo_access_fault,
+                    error.unk_inst => .illegal_inst,
+                    error.csr_read_priv => .illegal_inst,
+                    error.csr_write_priv => .illegal_inst,
+                    error.csr_write_ro => .illegal_inst,
+                    error.ecall => switch (self.priv_mode) {
+                        .M => .env_call_from_m_mode,
+                        .U => .env_call_from_u_mode,
+                        else => @panic("Unsupported"),
+                    },
+                };
+            };
+            return null;
+        }
+
+        fn exec_err(self: *Self, inst: Inst) !void {
+            switch (inst.opcode()) {
+                0b0110111 => { // LUI
+                    self.regs[inst.rd()] = inst.u_imm();
                     self.pc +%= 4;
                 },
-                0b001 => { // LH
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    const v: i16 = @bitCast(try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
-                    self.regs[inst.rd()] = @bitCast(@as(i32, v));
+                0b0010111 => { // AUIPC
+                    self.regs[inst.rd()] = self.pc +% inst.u_imm();
                     self.pc +%= 4;
                 },
-                0b010 => { // LW
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = try self.mem.read(u32, self.regs[inst.rs1()] +% imm);
-                    self.pc +%= 4;
+                0b1101111 => { // JAL
+                    self.regs[inst.rd()] = self.pc +% 4;
+                    const imm: u32 = @bitCast(inst.signed_j_imm());
+                    self.pc +%= imm;
                 },
-                0b100 => { // LBU
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = @as(u32, try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
-                    self.pc +%= 4;
-                },
-                0b101 => { // LHU
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = @as(u32, try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
-                    self.pc +%= 4;
-                },
-                else => return error.unk_inst,
-            },
-            0b0100011 => switch (inst.funct3()) {
-                0b000 => { // SB
-                    const imm: u32 = @bitCast(inst.signed_s_imm());
-                    try self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
-                    self.pc +%= 4;
-                },
-                0b001 => { // SH
-                    const imm: u32 = @bitCast(inst.signed_s_imm());
-                    try self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
-                    self.pc +%= 4;
-                },
-                0b010 => { // SW
-                    const imm: u32 = @bitCast(inst.signed_s_imm());
-                    try self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
-                    self.pc +%= 4;
-                },
-                else => return error.unk_inst,
-            },
-            0b0010011 => switch (inst.funct3()) {
-                0b000 => { // ADDI
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = self.regs[inst.rs1()] +% imm;
-                    self.pc +%= 4;
-                },
-                0b010 => { // SLTI
-                    const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                    self.regs[inst.rd()] = if (rs1 < inst.signed_i_imm()) 1 else 0;
-                    self.pc +%= 4;
-                },
-                0b011 => { // SLTIU
-                    const rs1 = self.regs[inst.rs1()];
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = if (rs1 < imm) 1 else 0;
-                    self.pc +%= 4;
-                },
-                0b100 => { // XORI
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = self.regs[inst.rs1()] ^ imm;
-                    self.pc +%= 4;
-                },
-                0b110 => { // ORI
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = self.regs[inst.rs1()] | imm;
-                    self.pc +%= 4;
-                },
-                0b111 => { // ANDI
-                    const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = self.regs[inst.rs1()] & imm;
-                    self.pc +%= 4;
-                },
-                0b001 => switch (inst.funct7()) {
-                    0b0000000 => { // SLLI
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] << inst.shamt();
-                        self.pc +%= 4;
+                0b1100111 => switch (inst.funct3()) {
+                    0b000 => { // JALR
+                        const next = self.pc +% 4;
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
+                        self.regs[inst.rd()] = next;
                     },
                     else => return error.unk_inst,
                 },
-                0b101 => switch (inst.funct7()) {
-                    0b0000000 => { // SRLI
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] >> inst.shamt();
-                        self.pc +%= 4;
+                0b1100011 => switch (inst.funct3()) {
+                    0b000 => { // BEQ
+                        if (self.regs[inst.rs1()] == self.regs[inst.rs2()]) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
                     },
-                    0b0100000 => { // SRAI
-                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                        self.regs[inst.rd()] = @bitCast(rs1 >> inst.shamt());
-                        self.pc +%= 4;
+                    0b001 => { // BNE
+                        if (self.regs[inst.rs1()] != self.regs[inst.rs2()]) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
                     },
-                    else => return error.unk_inst,
-                },
-            },
-            0b0110011 => switch (inst.funct3()) {
-                0b000 => switch (inst.funct7()) {
-                    0b0000000 => { // ADD
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] +% self.regs[inst.rs2()];
-                        self.pc +%= 4;
-                    },
-                    0b0100000 => { // SUB
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] -% self.regs[inst.rs2()];
-                        self.pc +%= 4;
-                    },
-                    0b0000001 => { // MUL
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] *% self.regs[inst.rs2()];
-                        self.pc +%= 4;
-                    },
-                    else => return error.unk_inst,
-                },
-                0b001 => switch (inst.funct7()) {
-                    0b0000000 => { // SLL
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] << @truncate(self.regs[inst.rs2()]);
-                        self.pc +%= 4;
-                    },
-                    0b0000001 => { // MULH
+                    0b100 => { // BLT
                         const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
                         const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                        const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, rs2));
-                        self.regs[inst.rd()] = @truncate(rd >> 32);
-                        self.pc +%= 4;
+                        if (rs1 < rs2) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
                     },
-                    else => return error.unk_inst,
-                },
-                0b010 => switch (inst.funct7()) {
-                    0b0000000 => { // SLT
+                    0b101 => { // BGE
                         const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
                         const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                        self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                        if (rs1 >= rs2) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
+                    },
+                    0b110 => { // BLTU
+                        if (self.regs[inst.rs1()] < self.regs[inst.rs2()]) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
+                    },
+                    0b111 => { // BGEU
+                        if (self.regs[inst.rs1()] >= self.regs[inst.rs2()]) {
+                            const imm: u32 = @bitCast(inst.signed_b_imm());
+                            self.pc +%= imm;
+                        } else {
+                            self.pc +%= 4;
+                        }
+                    },
+                    else => return error.unk_inst,
+                },
+                0b0000011 => switch (inst.funct3()) {
+                    0b000 => { // LB
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        const v: i8 = @bitCast(try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
+                        self.regs[inst.rd()] = @bitCast(@as(i32, v));
                         self.pc +%= 4;
                     },
-                    0b0000001 => { // MULHSU
-                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                        const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, self.regs[inst.rs2()]));
-                        self.regs[inst.rd()] = @truncate(rd >> 32);
+                    0b001 => { // LH
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        const v: i16 = @bitCast(try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
+                        self.regs[inst.rd()] = @bitCast(@as(i32, v));
+                        self.pc +%= 4;
+                    },
+                    0b010 => { // LW
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = try self.mem.read(u32, self.regs[inst.rs1()] +% imm);
+                        self.pc +%= 4;
+                    },
+                    0b100 => { // LBU
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = @as(u32, try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
+                        self.pc +%= 4;
+                    },
+                    0b101 => { // LHU
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = @as(u32, try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
                         self.pc +%= 4;
                     },
                     else => return error.unk_inst,
                 },
-                0b011 => switch (inst.funct7()) {
-                    0b0000000 => { // SLTU
+                0b0100011 => switch (inst.funct3()) {
+                    0b000 => { // SB
+                        const imm: u32 = @bitCast(inst.signed_s_imm());
+                        try self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
+                        self.pc +%= 4;
+                    },
+                    0b001 => { // SH
+                        const imm: u32 = @bitCast(inst.signed_s_imm());
+                        try self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
+                        self.pc +%= 4;
+                    },
+                    0b010 => { // SW
+                        const imm: u32 = @bitCast(inst.signed_s_imm());
+                        try self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
+                        self.pc +%= 4;
+                    },
+                    else => return error.unk_inst,
+                },
+                0b0010011 => switch (inst.funct3()) {
+                    0b000 => { // ADDI
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] +% imm;
+                        self.pc +%= 4;
+                    },
+                    0b010 => { // SLTI
+                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                        self.regs[inst.rd()] = if (rs1 < inst.signed_i_imm()) 1 else 0;
+                        self.pc +%= 4;
+                    },
+                    0b011 => { // SLTIU
                         const rs1 = self.regs[inst.rs1()];
-                        const rs2 = self.regs[inst.rs2()];
-                        self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = if (rs1 < imm) 1 else 0;
                         self.pc +%= 4;
                     },
-                    0b0000001 => { // MULHU
-                        const rs1 = self.regs[inst.rs1()];
-                        const rs2 = self.regs[inst.rs2()];
-                        self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
+                    0b100 => { // XORI
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] ^ imm;
                         self.pc +%= 4;
                     },
-                    else => return error.unk_inst,
+                    0b110 => { // ORI
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] | imm;
+                        self.pc +%= 4;
+                    },
+                    0b111 => { // ANDI
+                        const imm: u32 = @bitCast(inst.signed_i_imm());
+                        self.regs[inst.rd()] = self.regs[inst.rs1()] & imm;
+                        self.pc +%= 4;
+                    },
+                    0b001 => switch (inst.funct7()) {
+                        0b0000000 => { // SLLI
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] << inst.shamt();
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b101 => switch (inst.funct7()) {
+                        0b0000000 => { // SRLI
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] >> inst.shamt();
+                            self.pc +%= 4;
+                        },
+                        0b0100000 => { // SRAI
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            self.regs[inst.rd()] = @bitCast(rs1 >> inst.shamt());
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
                 },
-                0b100 => switch (inst.funct7()) {
-                    0b0000000 => { // XOR
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] ^ self.regs[inst.rs2()];
-                        self.pc +%= 4;
+                0b0110011 => switch (inst.funct3()) {
+                    0b000 => switch (inst.funct7()) {
+                        0b0000000 => { // ADD
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] +% self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        0b0100000 => { // SUB
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] -% self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // MUL
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] *% self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
                     },
-                    0b0000001 => { // DIV
-                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                        const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
-                            @bitCast(@as(i32, -1))
-                        else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
-                            @bitCast(@as(i32, std.math.minInt(i32)))
-                        else
-                            @bitCast(@divTrunc(rs1, rs2));
-                        self.pc +%= 4;
+                    0b001 => switch (inst.funct7()) {
+                        0b0000000 => { // SLL
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] << @truncate(self.regs[inst.rs2()]);
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // MULH
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, rs2));
+                            self.regs[inst.rd()] = @truncate(rd >> 32);
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
                     },
-                    else => return error.unk_inst,
+                    0b010 => switch (inst.funct7()) {
+                        0b0000000 => { // SLT
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // MULHSU
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            const rd: u64 = @bitCast(@as(i64, rs1) * @as(i64, self.regs[inst.rs2()]));
+                            self.regs[inst.rd()] = @truncate(rd >> 32);
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b011 => switch (inst.funct7()) {
+                        0b0000000 => { // SLTU
+                            const rs1 = self.regs[inst.rs1()];
+                            const rs2 = self.regs[inst.rs2()];
+                            self.regs[inst.rd()] = if (rs1 < rs2) 1 else 0;
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // MULHU
+                            const rs1 = self.regs[inst.rs1()];
+                            const rs2 = self.regs[inst.rs2()];
+                            self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b100 => switch (inst.funct7()) {
+                        0b0000000 => { // XOR
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] ^ self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // DIV
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                                @bitCast(@as(i32, -1))
+                            else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
+                                @bitCast(@as(i32, std.math.minInt(i32)))
+                            else
+                                @bitCast(@divTrunc(rs1, rs2));
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b101 => switch (inst.funct7()) {
+                        0b0000000 => { // SRL
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] >> @truncate(self.regs[inst.rs2()]);
+                            self.pc +%= 4;
+                        },
+                        0b0100000 => { // SRA
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            self.regs[inst.rd()] = @bitCast(rs1 >> @truncate(self.regs[inst.rs2()]));
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // DIVU
+                            const rs2 = self.regs[inst.rs2()];
+                            self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                                ~@as(u32, 0)
+                            else
+                                self.regs[inst.rs1()] / rs2;
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b110 => switch (inst.funct7()) {
+                        0b0000000 => { // OR
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] | self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // REM
+                            const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                                @bitCast(rs1)
+                            else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
+                                @as(u32, 0)
+                            else
+                                @bitCast(@rem(rs1, rs2));
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b111 => switch (inst.funct7()) {
+                        0b0000000 => { // AND
+                            self.regs[inst.rd()] = self.regs[inst.rs1()] & self.regs[inst.rs2()];
+                            self.pc +%= 4;
+                        },
+                        0b0000001 => { // REMU
+                            const rs2 = self.regs[inst.rs2()];
+                            const rs1 = self.regs[inst.rs1()];
+                            self.regs[inst.rd()] = if (rs2 == 0) // div by zero
+                                rs1
+                            else
+                                rs1 % rs2;
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
                 },
-                0b101 => switch (inst.funct7()) {
-                    0b0000000 => { // SRL
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] >> @truncate(self.regs[inst.rs2()]);
+                0b1110011 => switch (inst.funct3()) {
+                    0b000 => switch (inst.funct12()) {
+                        0b000000000000 => { // ECALL
+                            return error.ecall;
+                        },
+                        0b000000000001 => { // EBREAK
+                            log_debug(@src(), "Unimplemented ebreak", .{});
+                            self.pc +%= 4;
+                        },
+                        0b000000000010 => { // URET
+                            log_debug(@src(), "Unimplemented uret", .{});
+                            self.pc +%= 4;
+                        },
+                        0b000100000010 => { // SRET
+                            log_debug(@src(), "Unimplemented sret", .{});
+                            self.pc +%= 4;
+                        },
+                        0b001100000010 => { // MRET
+                            var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                            self.priv_mode = @enumFromInt(mstatus.mpp);
+                            mstatus.mie = mstatus.mpie;
+                            self.pc = self.csr.regs[Csr.MEPC];
+                        },
+                        0b000100000101 => { // WFI
+                            log_debug(@src(), "Unimplemented wfi", .{});
+                            self.pc +%= 4;
+                        },
+                        else => return error.unk_inst,
+                    },
+                    0b001 => { // CSRRW,
+                        if (inst.rd() != 0) {
+                            const v = try self.csr.read(self.priv_mode, inst.csr());
+                            self.regs[inst.rd()] = v;
+                        }
+                        try self.csr.write(self.priv_mode, inst.csr(), self.regs[inst.rs1()]);
                         self.pc +%= 4;
                     },
-                    0b0100000 => { // SRA
-                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                        self.regs[inst.rd()] = @bitCast(rs1 >> @truncate(self.regs[inst.rs2()]));
-                        self.pc +%= 4;
-                    },
-                    0b0000001 => { // DIVU
-                        const rs2 = self.regs[inst.rs2()];
-                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
-                            ~@as(u32, 0)
-                        else
-                            self.regs[inst.rs1()] / rs2;
-                        self.pc +%= 4;
-                    },
-                    else => return error.unk_inst,
-                },
-                0b110 => switch (inst.funct7()) {
-                    0b0000000 => { // OR
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] | self.regs[inst.rs2()];
-                        self.pc +%= 4;
-                    },
-                    0b0000001 => { // REM
-                        const rs1: i32 = @bitCast(self.regs[inst.rs1()]);
-                        const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
-                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
-                            @bitCast(rs1)
-                        else if (rs1 == std.math.minInt(i32) and rs2 == @as(i32, -1)) // overflow
-                            @as(u32, 0)
-                        else
-                            @bitCast(@rem(rs1, rs2));
-                        self.pc +%= 4;
-                    },
-                    else => return error.unk_inst,
-                },
-                0b111 => switch (inst.funct7()) {
-                    0b0000000 => { // AND
-                        self.regs[inst.rd()] = self.regs[inst.rs1()] & self.regs[inst.rs2()];
-                        self.pc +%= 4;
-                    },
-                    0b0000001 => { // REMU
-                        const rs2 = self.regs[inst.rs2()];
-                        const rs1 = self.regs[inst.rs1()];
-                        self.regs[inst.rd()] = if (rs2 == 0) // div by zero
-                            rs1
-                        else
-                            rs1 % rs2;
-                        self.pc +%= 4;
-                    },
-                    else => return error.unk_inst,
-                },
-            },
-            0b1110011 => switch (inst.funct3()) {
-                0b000 => switch (inst.funct12()) {
-                    0b000000000000 => { // ECALL
-                        return error.ecall;
-                    },
-                    0b000000000001 => { // EBREAK
-                        log_debug(@src(), "Unimplemented ebreak", .{});
-                        self.pc +%= 4;
-                    },
-                    0b000000000010 => { // URET
-                        log_debug(@src(), "Unimplemented uret", .{});
-                        self.pc +%= 4;
-                    },
-                    0b000100000010 => { // SRET
-                        log_debug(@src(), "Unimplemented sret", .{});
-                        self.pc +%= 4;
-                    },
-                    0b001100000010 => { // MRET
-                        var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
-                        self.priv_mode = @enumFromInt(mstatus.mpp);
-                        mstatus.mie = mstatus.mpie;
-                        self.pc = self.csr.regs[Csr.MEPC];
-                    },
-                    0b000100000101 => { // WFI
-                        log_debug(@src(), "Unimplemented wfi", .{});
-                        self.pc +%= 4;
-                    },
-                    else => return error.unk_inst,
-                },
-                0b001 => { // CSRRW,
-                    if (inst.rd() != 0) {
-                        const v = try self.csr.read(self.priv_mode, inst.csr());
-                        self.regs[inst.rd()] = v;
-                    }
-                    try self.csr.write(self.priv_mode, inst.csr(), self.regs[inst.rs1()]);
-                    self.pc +%= 4;
-                },
-                0b010 => { // CSRRS,
-                    const csr = inst.csr();
-                    const v = try self.csr.read(self.priv_mode, csr);
-                    self.regs[inst.rd()] = v;
-                    const inst_rs1 = inst.rs1();
-                    if (inst_rs1 != 0) {
-                        try self.csr.write(self.priv_mode, csr, v | self.regs[inst_rs1]);
-                    }
-                    self.pc +%= 4;
-                },
-                0b011 => { // CSRRC,
-                    const csr = inst.csr();
-                    const v = try self.csr.read(self.priv_mode, csr);
-                    self.regs[inst.rd()] = v;
-                    const inst_rs1 = inst.rs1();
-                    if (inst_rs1 != 0) {
-                        try self.csr.write(self.priv_mode, csr, v & ~self.regs[inst_rs1]);
-                    }
-                    self.pc +%= 4;
-                },
-                0b101 => { // CSRRWI,
-                    const csr = inst.csr();
-                    if (inst.rd() != 0) {
+                    0b010 => { // CSRRS,
+                        const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
-                    }
-                    const uimm = inst.csr_imm();
-                    try self.csr.write(self.priv_mode, csr, uimm);
-                    self.pc +%= 4;
-                },
-                0b110 => { // CSRRSI,
-                    const csr = inst.csr();
-                    const v = try self.csr.read(self.priv_mode, csr);
-                    self.regs[inst.rd()] = v;
-                    const uimm = inst.csr_imm();
-                    if (uimm != 0) {
-                        try self.csr.write(self.priv_mode, csr, v | uimm);
-                    }
-                    self.pc +%= 4;
-                },
-                0b111 => { // CSRRCI,
-                    const csr = inst.csr();
-                    const v = try self.csr.read(self.priv_mode, csr);
-                    self.regs[inst.rd()] = v;
-                    const uimm = inst.csr_imm();
-                    if (uimm != 0) {
-                        try self.csr.write(self.priv_mode, csr, v & ~uimm);
-                    }
-                    self.pc +%= 4;
-                },
-                else => return error.unk_inst,
-            },
-            0b0101111 => switch (inst.funct3()) {
-                // TODO miss-aligned address exception
-                0b10 => switch (inst.funct5()) {
-                    0b00010 => { // LR_W
+                        const inst_rs1 = inst.rs1();
+                        if (inst_rs1 != 0) {
+                            try self.csr.write(self.priv_mode, csr, v | self.regs[inst_rs1]);
+                        }
                         self.pc +%= 4;
-                        @panic("TODO LR_W");
                     },
-                    0b00011 => { // SC_W
-                        self.pc +%= 4;
-                        @panic("TODO SC_W");
-                    },
-                    0b00001 => { // AMOSWAP_W
-                        self.pc +%= 4;
-                        @panic("TODO AMOSWAP_W");
-                    },
-                    0b00000 => { // AMOADD_W
-                        const rs1 = self.regs[inst.rs1()];
-                        var v = try self.mem.read(u32, rs1);
+                    0b011 => { // CSRRC,
+                        const csr = inst.csr();
+                        const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
-                        v = v & self.regs[inst.rs2()];
-                        try self.mem.write(u32, rs1, v);
+                        const inst_rs1 = inst.rs1();
+                        if (inst_rs1 != 0) {
+                            try self.csr.write(self.priv_mode, csr, v & ~self.regs[inst_rs1]);
+                        }
                         self.pc +%= 4;
                     },
-                    0b00100 => { // AMOXOR_W
+                    0b101 => { // CSRRWI,
+                        const csr = inst.csr();
+                        if (inst.rd() != 0) {
+                            const v = try self.csr.read(self.priv_mode, csr);
+                            self.regs[inst.rd()] = v;
+                        }
+                        const uimm = inst.csr_imm();
+                        try self.csr.write(self.priv_mode, csr, uimm);
                         self.pc +%= 4;
-                        @panic("TODO AMOXOR_W");
                     },
-                    0b01100 => { // AMOAND_W
+                    0b110 => { // CSRRSI,
+                        const csr = inst.csr();
+                        const v = try self.csr.read(self.priv_mode, csr);
+                        self.regs[inst.rd()] = v;
+                        const uimm = inst.csr_imm();
+                        if (uimm != 0) {
+                            try self.csr.write(self.priv_mode, csr, v | uimm);
+                        }
                         self.pc +%= 4;
-                        @panic("TODO AMOAND_W");
                     },
-                    0b01000 => { // AMOOR_W
+                    0b111 => { // CSRRCI,
+                        const csr = inst.csr();
+                        const v = try self.csr.read(self.priv_mode, csr);
+                        self.regs[inst.rd()] = v;
+                        const uimm = inst.csr_imm();
+                        if (uimm != 0) {
+                            try self.csr.write(self.priv_mode, csr, v & ~uimm);
+                        }
                         self.pc +%= 4;
-                        @panic("TODO AMOOR_W");
                     },
-                    0b10000 => { // AMOMIN_W
-                        self.pc +%= 4;
-                        @panic("TODO AMOMIN_W");
+                    else => return error.unk_inst,
+                },
+                0b0101111 => switch (inst.funct3()) {
+                    // TODO miss-aligned address exception
+                    0b10 => switch (inst.funct5()) {
+                        0b00010 => { // LR_W
+                            self.pc +%= 4;
+                            @panic("TODO LR_W");
+                        },
+                        0b00011 => { // SC_W
+                            self.pc +%= 4;
+                            @panic("TODO SC_W");
+                        },
+                        0b00001 => { // AMOSWAP_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOSWAP_W");
+                        },
+                        0b00000 => { // AMOADD_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = v & self.regs[inst.rs2()];
+                            try self.mem.write(u32, rs1, v);
+                            self.pc +%= 4;
+                        },
+                        0b00100 => { // AMOXOR_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOXOR_W");
+                        },
+                        0b01100 => { // AMOAND_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOAND_W");
+                        },
+                        0b01000 => { // AMOOR_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOOR_W");
+                        },
+                        0b10000 => { // AMOMIN_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOMIN_W");
+                        },
+                        0b10100 => { // AMOMAX_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOMAX_W");
+                        },
+                        0b11000 => { // AMOMINU_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOMINU_W");
+                        },
+                        0b11100 => { // AMOMAXU_W
+                            self.pc +%= 4;
+                            @panic("TODO AMOMAXU_W");
+                        },
+                        else => return error.unk_inst,
                     },
-                    0b10100 => { // AMOMAX_W
+                    else => return error.unk_inst,
+                },
+                0b0001111 => switch (inst.funct3()) {
+                    0b000 => { // FENCE
                         self.pc +%= 4;
-                        @panic("TODO AMOMAX_W");
                     },
-                    0b11000 => { // AMOMINU_W
+                    0b001 => { // FENCEI
                         self.pc +%= 4;
-                        @panic("TODO AMOMINU_W");
-                    },
-                    0b11100 => { // AMOMAXU_W
-                        self.pc +%= 4;
-                        @panic("TODO AMOMAXU_W");
                     },
                     else => return error.unk_inst,
                 },
                 else => return error.unk_inst,
-            },
-            0b0001111 => switch (inst.funct3()) {
-                0b000 => { // FENCE
-                    self.pc +%= 4;
-                },
-                0b001 => { // FENCEI
-                    self.pc +%= 4;
-                },
-                else => return error.unk_inst,
-            },
-            else => return error.unk_inst,
+            }
+            self.regs[0] = 0;
         }
-        self.regs[0] = 0;
-    }
-};
+    };
+}
 
 test "inst" {
     const inst = Inst.init(0);

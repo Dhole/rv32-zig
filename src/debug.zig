@@ -4,7 +4,7 @@ const Writer = std.Io.Writer;
 const root = @import("root.zig");
 // const Inst = root.Inst;
 // const Cpu = root.Cpu;
-const Memory = root.Memory;
+const Memory = root.BasicMemory;
 
 pub const MemoryFmt = struct {
     mem: *Memory,

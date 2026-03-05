@@ -7,8 +7,8 @@ const elfy = @import("elfy");
 
 const root = @import("root.zig");
 const Inst = root.Inst;
-const Cpu = root.Cpu;
-const Memory = root.Memory;
+const Cpu = root.BasicCpu;
+const Memory = root.BasicMemory;
 
 const disasm = @import("disasm.zig");
 const InstFmt = disasm.InstFmt;
@@ -41,10 +41,10 @@ fn test_load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
 
     cpu.pc = @intCast(elf.getHeader().getEntryPoint());
 
-    const rom_addr = cpu.mem.rom_offset;
-    const rom_size = cpu.mem.rom.len;
-    const ram_addr = cpu.mem.ram_offset;
-    const ram_size = cpu.mem.ram.len;
+    const rom_addr = cpu.mem.inner.rom_offset;
+    const rom_size = cpu.mem.inner.rom.len;
+    const ram_addr = cpu.mem.inner.ram_offset;
+    const ram_size = cpu.mem.inner.ram.len;
 
     var segments = try elf.getIterator(elfy.ElfProgram);
     while (try segments.next()) |segment| {
@@ -57,13 +57,13 @@ fn test_load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
         if (!flags.write() & ((rom_addr <= vaddr) & (vaddr + vsize <= rom_addr + rom_size))) {
             const data = try elf.getProgramData(segment);
             const offset = vaddr - rom_addr;
-            @memset(cpu.mem.rom[offset .. offset + vsize], 0);
-            @memcpy(cpu.mem.rom[offset .. offset + data.len], data);
+            @memset(cpu.mem.inner.rom[offset .. offset + vsize], 0);
+            @memcpy(cpu.mem.inner.rom[offset .. offset + data.len], data);
         } else if (flags.write() & ((ram_addr <= vaddr) & (vaddr + vsize <= ram_addr + ram_size))) {
             const data = try elf.getProgramData(segment);
             const offset = vaddr - ram_addr;
-            @memset(cpu.mem.ram[offset .. offset + vsize], 0);
-            @memcpy(cpu.mem.ram[offset .. offset + data.len], data);
+            @memset(cpu.mem.inner.ram[offset .. offset + vsize], 0);
+            @memcpy(cpu.mem.inner.ram[offset .. offset + data.len], data);
         } else {
             std.debug.panic("Unexpected segment config", .{});
         }
@@ -81,11 +81,10 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
 
     var i: usize = 0;
     while (i < 0x1000) : (i += 1) {
-        const word = try cpu.mem.read(u32, cpu.pc);
-        const inst = Inst.init(word);
+        const inst, const opt_exception = cpu.step_debug();
+        _ = inst;
         // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
         // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
-        const opt_exception = cpu.exec(inst);
         if (opt_exception) |exception| {
             switch (exception) {
                 .env_call_from_u_mode => return cpu,
