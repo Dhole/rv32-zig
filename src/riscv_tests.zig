@@ -81,16 +81,15 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
 
     var i: usize = 0;
     while (i < 0x1000) : (i += 1) {
-        const word = cpu.mem.read(u32, cpu.pc);
+        const word = try cpu.mem.read(u32, cpu.pc);
         const inst = Inst.init(word);
-        std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
-        std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
-        const opt_trap = cpu.exec(inst);
-        if (opt_trap) |trap| {
-            if (trap == .ecall) {
-                return cpu;
-            } else {
-                return error.unexpected_trap;
+        // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
+        // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
+        const opt_exception = cpu.exec(inst);
+        if (opt_exception) |exception| {
+            switch (exception) {
+                .env_call_from_u_mode => return cpu,
+                else => return error.unexpected_trap,
             }
         }
     }
@@ -150,7 +149,8 @@ test "rv32ui" {
         const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ui-p-{s}", .{op_str});
 
         const cpu = try test_exec_elf(allocator, elf_path);
-        try expectEqual(0, cpu.regs[10]);
+        // try expectEqual(0, cpu.regs[10]); // a0
+        try expectEqual(1, cpu.regs[3]); // gp
     }
 }
 

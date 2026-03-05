@@ -18,6 +18,15 @@ pub const Inst = packed struct {
             rs2: u5,
             funct7: u7,
         };
+        const RAType = packed struct {
+            rd: u5,
+            funct3: u3,
+            rs1: u5,
+            rs2: u5,
+            rl: u1,
+            aq: u1,
+            funct5: u5,
+        };
         const IType = packed struct {
             rd: u5,
             funct3: u3,
@@ -53,6 +62,7 @@ pub const Inst = packed struct {
         };
 
         r_type: RType,
+        ra_type: RAType,
         i_type: IType,
         b_type: BType,
         s_type: SType,
@@ -91,6 +101,10 @@ pub const Inst = packed struct {
 
     pub fn funct3(self: Self) u3 {
         return self.args.r_type.funct3;
+    }
+
+    pub fn funct5(self: Self) u5 {
+        return self.args.ra_type.funct5;
     }
 
     pub fn funct7(self: Self) u7 {
@@ -211,20 +225,22 @@ pub const Memory = struct {
         };
     }
 
-    pub fn read(self: *Self, comptime T: type, addr: u32) T {
+    pub fn read(self: *Self, comptime T: type, addr: u32) !T {
         if (self.rom_offset <= addr and addr < self.rom_offset + self.rom.len) {
             return buf_read(T, self.rom, addr - self.rom_offset);
         } else if (self.ram_offset <= addr and addr < self.ram_offset + self.ram.len) {
             return buf_read(T, self.ram, addr - self.ram_offset);
         }
-        @panic("TODO: invalid read");
+        debug.print("invalid read at {x:08}\n", .{addr});
+        return error.read_invalid_addr;
     }
 
-    pub fn write(self: *Self, comptime T: type, addr: u32, v: T) void {
+    pub fn write(self: *Self, comptime T: type, addr: u32, v: T) !void {
         if (self.ram_offset <= addr and addr < self.ram_offset + self.ram.len) {
             return buf_write(T, self.ram, addr - self.ram_offset, v);
         }
-        debug.panic("TODO: invalid write at addr {x:08}", .{addr});
+        debug.print("invalid write at {x:08}\n", .{addr});
+        return error.write_invalid_addr;
     }
 
     pub fn deinit(self: *Self) void {
@@ -233,26 +249,184 @@ pub const Memory = struct {
     }
 };
 
-const CSR_MEPC: u32 = 0x341;
-
-pub const Trap = enum {
-    invalid_inst,
-    ecall,
+pub const PrivilegeMode = enum(u2) {
+    U = 0b00,
+    S = 0b01,
+    M = 0b11,
+    _,
 };
+
+pub const MStatus = packed struct {
+    wpri0: u1,
+    sie: u1,
+    wpri2: u1,
+    mie: u1,
+    wpri4: u1,
+    spie: u1,
+    ube: u1,
+    mpie: u1,
+    spp: u1,
+    vs: u2,
+    mpp: u2,
+    fs: u2,
+    xs: u2,
+    mprv: u1,
+    sum: u1,
+    mxr: u1,
+    tvm: u1,
+    tw: u1,
+    tsr: u1,
+    spelp: u1,
+    sdt: u1,
+    wpri25: u6,
+    sd: u1,
+};
+
+pub const MTVec = packed struct {
+    const Mode = enum(u2) {
+        direct = 0,
+        vectored = 1,
+        _,
+    };
+    mode: Mode,
+    base: u30,
+
+    fn address(self: *MTVec) u32 {
+        return @as(u32, self.base) << 2;
+    }
+};
+
+const ExceptionCode = enum(u31) {
+    illegal_inst = 2,
+    load_access_fault = 5,
+    store_amo_access_fault = 7,
+    env_call_from_u_mode = 8,
+    env_call_from_m_mode = 11,
+    _,
+};
+
+pub const MCause = packed struct {
+    exception: ExceptionCode,
+    interrupt: u1,
+};
+
+const Privilege = struct {
+    mode: PrivilegeMode,
+    read_only: bool,
+};
+
+const Csr = struct {
+    regs: [4096]u32,
+
+    // Machine Information Registers
+    const MHARTID: u12 = 0xf14;
+    // Machine Non-Maskable Interrupt Handling
+    const MNSTATUS: u12 = 0x744;
+    // Machine Memory Protection
+    const PMPCFG0: u12 = 0x3a0;
+    const PMPADDR0: u12 = 0x3b0;
+    // Machine Trap Setup
+    const MSTATUS: u12 = 0x300;
+    const MEDELEG: u12 = 0x302;
+    const MIDELEG: u12 = 0x303;
+    const MIE: u12 = 0x304;
+    const MTVEC: u12 = 0x305;
+    // Machine Trap Handling
+    const MEPC: u12 = 0x341;
+    const MCAUSE: u12 = 0x342;
+
+    // Supervisor Protection and Translation
+    const SATP: u12 = 0x180;
+
+    fn build_priv_table() [4096]Privilege {
+        var table = [_]Privilege{.{ .mode = .M, .read_only = true }} ** 4096;
+        table[MHARTID] = .{ .mode = .M, .read_only = true };
+
+        table[MNSTATUS] = .{ .mode = .M, .read_only = false };
+
+        table[MSTATUS] = .{ .mode = .M, .read_only = false };
+        table[MEDELEG] = .{ .mode = .M, .read_only = false };
+        table[MIDELEG] = .{ .mode = .M, .read_only = false };
+        table[MIE] = .{ .mode = .M, .read_only = false };
+        table[MTVEC] = .{ .mode = .M, .read_only = false };
+
+        table[MEPC] = .{ .mode = .M, .read_only = false };
+        table[MCAUSE] = .{ .mode = .M, .read_only = false };
+
+        table[PMPCFG0] = .{ .mode = .M, .read_only = false };
+        table[PMPADDR0] = .{ .mode = .M, .read_only = false };
+
+        table[SATP] = .{ .mode = .S, .read_only = false };
+
+        return table;
+    }
+
+    const priv_table = build_priv_table();
+
+    const Self = @This();
+
+    fn init() Self {
+        var regs = [_]u32{0} ** 4096;
+        regs[MHARTID] = 0;
+        return .{
+            .regs = regs,
+        };
+    }
+
+    fn read(self: *Self, mode: PrivilegeMode, addr: u12) !u32 {
+        if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
+            std.debug.print("CSR: Mode lower than required\n", .{});
+            return error.csr_read_priv;
+        }
+        switch (addr) {
+            MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE => {},
+            // MHARTID, MNSTATUS, SATP, PMPCFG0, PMPADDR0, MSTATUS, MEDELEG, MIDELEG, MIE, MTVEC, MEPC, MCAUSE => {},
+            else => std.debug.print("Unimplemented  read csr {x:0>3}\n", .{addr}),
+        }
+        return self.regs[addr];
+    }
+
+    fn write(self: *Self, mode: PrivilegeMode, addr: u12, v: u32) !void {
+        if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
+            std.debug.print("CSR: Mode lower than required\n", .{});
+            return error.csr_write_priv;
+        }
+        if (priv_table[addr].read_only) {
+            std.debug.print("CSR: is read-only: {x:0>3}\n", .{addr});
+            return error.csr_write_ro;
+        }
+        switch (addr) {
+            MTVEC => {
+                const mtvec: MTVec = @bitCast(v);
+                if (mtvec.mode != .direct) {
+                    std.debug.panic("Unimplemented mtvec.mode={s}", .{@tagName(mtvec.mode)});
+                }
+            },
+            else => std.debug.print("Unimplemented write csr {x:0>3}\n", .{addr}),
+        }
+        self.regs[addr] = v;
+    }
+};
+
+const CSR_MEPC: u32 = 0x341;
+const CSR_MCAUSE: u32 = 0x342;
+const CSR_MTVEC: u32 = 0x303;
 
 pub const Cpu = struct {
     regs: [32]u32,
     pc: u32,
-    csr: [4096]u32,
+    priv_mode: PrivilegeMode,
+    csr: Csr,
     mem: Memory,
 
     const Self = @This();
 
     pub fn init(mem: Memory) Self {
-        return Self{
+        return .{
             .regs = .{0} ** 32,
             .pc = 0,
-            .csr = [_]u32{0} ** 4096,
+            .priv_mode = .M,
+            .csr = Csr.init(),
             .mem = mem,
         };
     }
@@ -261,7 +435,39 @@ pub const Cpu = struct {
         self.mem.deinit();
     }
 
-    pub fn exec(self: *Self, inst: Inst) ?Trap {
+    pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
+        self.csr.regs[Csr.MEPC] = self.pc;
+        self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
+        // Set MTVAL to 0?
+        var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+        mstatus.mpp = @intFromEnum(self.priv_mode);
+        mstatus.mpie = mstatus.mie;
+        mstatus.mie = 0;
+        self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
+        const mtvec: MTVec = @bitCast(self.csr.regs[Csr.MTVEC]);
+        self.pc = mtvec.address();
+    }
+
+    pub fn exec(self: *Self, inst: Inst) ?ExceptionCode {
+        self.exec_err(inst) catch |err| {
+            return switch (err) {
+                error.read_invalid_addr => .load_access_fault,
+                error.write_invalid_addr => .store_amo_access_fault,
+                error.unk_inst => .illegal_inst,
+                error.csr_read_priv => .illegal_inst,
+                error.csr_write_priv => .illegal_inst,
+                error.csr_write_ro => .illegal_inst,
+                error.ecall => switch (self.priv_mode) {
+                    .M => .env_call_from_m_mode,
+                    .U => .env_call_from_u_mode,
+                    else => @panic("Unsupported"),
+                },
+            };
+        };
+        return null;
+    }
+
+    fn exec_err(self: *Self, inst: Inst) !void {
         switch (inst.opcode()) {
             0b0110111 => { // LUI
                 self.regs[inst.rd()] = inst.u_imm();
@@ -283,7 +489,7 @@ pub const Cpu = struct {
                     self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
                     self.regs[inst.rd()] = next;
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
             },
             0b1100011 => switch (inst.funct3()) {
                 0b000 => { // BEQ
@@ -338,55 +544,55 @@ pub const Cpu = struct {
                         self.pc +%= 4;
                     }
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
             },
             0b0000011 => switch (inst.funct3()) {
                 0b000 => { // LB
                     const imm: u32 = @bitCast(inst.signed_i_imm());
-                    const v: i8 = @bitCast(self.mem.read(u8, self.regs[inst.rs1()] +% imm));
+                    const v: i8 = @bitCast(try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
                     self.regs[inst.rd()] = @bitCast(@as(i32, v));
                     self.pc +%= 4;
                 },
                 0b001 => { // LH
                     const imm: u32 = @bitCast(inst.signed_i_imm());
-                    const v: i16 = @bitCast(self.mem.read(u16, self.regs[inst.rs1()] +% imm));
+                    const v: i16 = @bitCast(try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
                     self.regs[inst.rd()] = @bitCast(@as(i32, v));
                     self.pc +%= 4;
                 },
                 0b010 => { // LW
                     const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = self.mem.read(u32, self.regs[inst.rs1()] +% imm);
+                    self.regs[inst.rd()] = try self.mem.read(u32, self.regs[inst.rs1()] +% imm);
                     self.pc +%= 4;
                 },
                 0b100 => { // LBU
                     const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = @as(u32, self.mem.read(u8, self.regs[inst.rs1()] +% imm));
+                    self.regs[inst.rd()] = @as(u32, try self.mem.read(u8, self.regs[inst.rs1()] +% imm));
                     self.pc +%= 4;
                 },
                 0b101 => { // LHU
                     const imm: u32 = @bitCast(inst.signed_i_imm());
-                    self.regs[inst.rd()] = @as(u32, self.mem.read(u16, self.regs[inst.rs1()] +% imm));
+                    self.regs[inst.rd()] = @as(u32, try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
                     self.pc +%= 4;
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
             },
             0b0100011 => switch (inst.funct3()) {
                 0b000 => { // SB
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
+                    try self.mem.write(u8, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
                     self.pc +%= 4;
                 },
                 0b001 => { // SH
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
+                    try self.mem.write(u16, self.regs[inst.rs1()] +% imm, @truncate(self.regs[inst.rs2()]));
                     self.pc +%= 4;
                 },
                 0b010 => { // SW
                     const imm: u32 = @bitCast(inst.signed_s_imm());
-                    self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
+                    try self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
                     self.pc +%= 4;
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
             },
             0b0010011 => switch (inst.funct3()) {
                 0b000 => { // ADDI
@@ -425,7 +631,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = self.regs[inst.rs1()] << inst.shamt();
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b101 => switch (inst.funct7()) {
                     0b0000000 => { // SRLI
@@ -437,7 +643,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = @bitCast(rs1 >> inst.shamt());
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
             },
             0b0110011 => switch (inst.funct3()) {
@@ -454,7 +660,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = self.regs[inst.rs1()] *% self.regs[inst.rs2()];
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b001 => switch (inst.funct7()) {
                     0b0000000 => { // SLL
@@ -468,7 +674,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = @truncate(rd >> 32);
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b010 => switch (inst.funct7()) {
                     0b0000000 => { // SLT
@@ -483,7 +689,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = @truncate(rd >> 32);
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b011 => switch (inst.funct7()) {
                     0b0000000 => { // SLTU
@@ -498,7 +704,7 @@ pub const Cpu = struct {
                         self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b100 => switch (inst.funct7()) {
                     0b0000000 => { // XOR
@@ -516,7 +722,7 @@ pub const Cpu = struct {
                             @bitCast(@divTrunc(rs1, rs2));
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b101 => switch (inst.funct7()) {
                     0b0000000 => { // SRL
@@ -536,7 +742,7 @@ pub const Cpu = struct {
                             self.regs[inst.rs1()] / rs2;
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b110 => switch (inst.funct7()) {
                     0b0000000 => { // OR
@@ -554,7 +760,7 @@ pub const Cpu = struct {
                             @bitCast(@rem(rs1, rs2));
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b111 => switch (inst.funct7()) {
                     0b0000000 => { // AND
@@ -570,13 +776,13 @@ pub const Cpu = struct {
                             rs1 % rs2;
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
             },
             0b1110011 => switch (inst.funct3()) {
                 0b000 => switch (inst.funct12()) {
                     0b000000000000 => { // ECALL
-                        return .ecall;
+                        return error.ecall;
                     },
                     0b000000000001 => { // EBREAK
                         log_debug(@src(), "Unimplemented ebreak", .{});
@@ -591,61 +797,131 @@ pub const Cpu = struct {
                         self.pc +%= 4;
                     },
                     0b001100000010 => { // MRET
-                        self.pc = self.csr[CSR_MEPC];
+                        var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                        self.priv_mode = @enumFromInt(mstatus.mpp);
+                        mstatus.mie = mstatus.mpie;
+                        self.pc = self.csr.regs[Csr.MEPC];
                     },
                     0b000100000101 => { // WFI
                         log_debug(@src(), "Unimplemented wfi", .{});
                         self.pc +%= 4;
                     },
-                    else => return .invalid_inst,
+                    else => return error.unk_inst,
                 },
                 0b001 => { // CSRRW,
                     if (inst.rd() != 0) {
-                        const v = self.csr[inst.csr()];
+                        const v = try self.csr.read(self.priv_mode, inst.csr());
                         self.regs[inst.rd()] = v;
                     }
-                    self.csr[inst.csr()] = self.regs[inst.rs1()];
+                    try self.csr.write(self.priv_mode, inst.csr(), self.regs[inst.rs1()]);
                     self.pc +%= 4;
                 },
                 0b010 => { // CSRRS,
-                    const v = self.csr[inst.csr()];
+                    const csr = inst.csr();
+                    const v = try self.csr.read(self.priv_mode, csr);
                     self.regs[inst.rd()] = v;
-                    self.csr[inst.csr()] = v | self.regs[inst.rs1()];
+                    const inst_rs1 = inst.rs1();
+                    if (inst_rs1 != 0) {
+                        try self.csr.write(self.priv_mode, csr, v | self.regs[inst_rs1]);
+                    }
                     self.pc +%= 4;
                 },
                 0b011 => { // CSRRC,
-                    const v = self.csr[inst.csr()];
+                    const csr = inst.csr();
+                    const v = try self.csr.read(self.priv_mode, csr);
                     self.regs[inst.rd()] = v;
-                    self.csr[inst.csr()] = v & ~self.regs[inst.rs1()];
+                    const inst_rs1 = inst.rs1();
+                    if (inst_rs1 != 0) {
+                        try self.csr.write(self.priv_mode, csr, v & ~self.regs[inst_rs1]);
+                    }
                     self.pc +%= 4;
                 },
                 0b101 => { // CSRRWI,
+                    const csr = inst.csr();
                     if (inst.rd() != 0) {
-                        const v = self.csr[inst.csr()];
+                        const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
                     }
-                    self.csr[inst.csr()] = inst.csr();
+                    const uimm = inst.csr_imm();
+                    try self.csr.write(self.priv_mode, csr, uimm);
                     self.pc +%= 4;
                 },
                 0b110 => { // CSRRSI,
-                    const v = self.csr[inst.csr()];
+                    const csr = inst.csr();
+                    const v = try self.csr.read(self.priv_mode, csr);
                     self.regs[inst.rd()] = v;
                     const uimm = inst.csr_imm();
                     if (uimm != 0) {
-                        self.csr[inst.csr()] = v | uimm;
+                        try self.csr.write(self.priv_mode, csr, v | uimm);
                     }
                     self.pc +%= 4;
                 },
                 0b111 => { // CSRRCI,
-                    const v = self.csr[inst.csr()];
+                    const csr = inst.csr();
+                    const v = try self.csr.read(self.priv_mode, csr);
                     self.regs[inst.rd()] = v;
                     const uimm = inst.csr_imm();
                     if (uimm != 0) {
-                        self.csr[inst.csr()] = v & ~uimm;
+                        try self.csr.write(self.priv_mode, csr, v & ~uimm);
                     }
                     self.pc +%= 4;
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
+            },
+            0b0101111 => switch (inst.funct3()) {
+                // TODO miss-aligned address exception
+                0b10 => switch (inst.funct5()) {
+                    0b00010 => { // LR_W
+                        self.pc +%= 4;
+                        @panic("TODO LR_W");
+                    },
+                    0b00011 => { // SC_W
+                        self.pc +%= 4;
+                        @panic("TODO SC_W");
+                    },
+                    0b00001 => { // AMOSWAP_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOSWAP_W");
+                    },
+                    0b00000 => { // AMOADD_W
+                        const rs1 = self.regs[inst.rs1()];
+                        var v = try self.mem.read(u32, rs1);
+                        self.regs[inst.rd()] = v;
+                        v = v & self.regs[inst.rs2()];
+                        try self.mem.write(u32, rs1, v);
+                        self.pc +%= 4;
+                    },
+                    0b00100 => { // AMOXOR_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOXOR_W");
+                    },
+                    0b01100 => { // AMOAND_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOAND_W");
+                    },
+                    0b01000 => { // AMOOR_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOOR_W");
+                    },
+                    0b10000 => { // AMOMIN_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOMIN_W");
+                    },
+                    0b10100 => { // AMOMAX_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOMAX_W");
+                    },
+                    0b11000 => { // AMOMINU_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOMINU_W");
+                    },
+                    0b11100 => { // AMOMAXU_W
+                        self.pc +%= 4;
+                        @panic("TODO AMOMAXU_W");
+                    },
+                    else => return error.unk_inst,
+                },
+                else => return error.unk_inst,
             },
             0b0001111 => switch (inst.funct3()) {
                 0b000 => { // FENCE
@@ -654,12 +930,11 @@ pub const Cpu = struct {
                 0b001 => { // FENCEI
                     self.pc +%= 4;
                 },
-                else => return .invalid_inst,
+                else => return error.unk_inst,
             },
-            else => return .invalid_inst,
+            else => return error.unk_inst,
         }
         self.regs[0] = 0;
-        return null;
     }
 };
 

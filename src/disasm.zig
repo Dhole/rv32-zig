@@ -75,6 +75,19 @@ const Opcode = enum {
     REM,
     REMU,
 
+    // A
+    LR_W,
+    SC_W,
+    AMOSWAP_W,
+    AMOADD_W,
+    AMOXOR_W,
+    AMOAND_W,
+    AMOOR_W,
+    AMOMIN_W,
+    AMOMAX_W,
+    AMOMINU_W,
+    AMOMAXU_W,
+
     // "Zicsr", Control and Status Register (CSR) Instructions, Version 2.0
     CSRRW,
     CSRRS,
@@ -142,6 +155,17 @@ const Opcode = enum {
             .MULHU => "mulhu",
             .REM => "rem",
             .REMU => "remu",
+            .LR_W => "lr.w",
+            .SC_W => "sc.w",
+            .AMOSWAP_W => "amoswap.w",
+            .AMOADD_W => "amoadd.w",
+            .AMOXOR_W => "amoxor.w",
+            .AMOAND_W => "amoand.w",
+            .AMOOR_W => "amoor.w",
+            .AMOMIN_W => "amomin.w",
+            .AMOMAX_W => "amomax.w",
+            .AMOMINU_W => "amominu.w",
+            .AMOMAXU_W => "amomaxu.w",
             .CSRRW => "csrrw",
             .CSRRS => "csrrs",
             .CSRRC => "csrrc",
@@ -268,6 +292,23 @@ pub fn inst_op(inst: Inst) ?Opcode {
             0b111 => .CSRRCI,
             else => null,
         },
+        0b0101111 => switch (inst.funct3()) {
+            0b10 => switch (inst.funct5()) {
+                0b00010 => .LR_W,
+                0b00011 => .SC_W,
+                0b00001 => .AMOSWAP_W,
+                0b00000 => .AMOADD_W,
+                0b00100 => .AMOXOR_W,
+                0b01100 => .AMOAND_W,
+                0b01000 => .AMOOR_W,
+                0b10000 => .AMOMIN_W,
+                0b10100 => .AMOMAX_W,
+                0b11000 => .AMOMINU_W,
+                0b11100 => .AMOMAXU_W,
+                else => null,
+            },
+            else => null,
+        },
         0b0001111 => switch (inst.funct3()) {
             0b000 => .FENCE,
             0b001 => .FENCEI,
@@ -286,6 +327,10 @@ pub fn inst_format(w: *Writer, addr: u32, inst: Inst) !void {
     switch (op) {
         // R-Type
         .ADD, .SUB, .SLL, .SLT, .SLTU, .XOR, .SRL, .SRA, .OR, .AND, .DIV, .DIVU, .MUL, .MULH, .MULHSU, .MULHU, .REM, .REMU => {
+            try w.print(" {s}, {s}, {s}", .{ reg[inst.rd()], reg[inst.rs1()], reg[inst.rs2()] });
+        },
+        // RA-Type
+        .LR_W, .SC_W, .AMOSWAP_W, .AMOADD_W, .AMOXOR_W, .AMOAND_W, .AMOOR_W, .AMOMIN_W, .AMOMAX_W, .AMOMINU_W, .AMOMAXU_W => {
             try w.print(" {s}, {s}, {s}", .{ reg[inst.rd()], reg[inst.rs1()], reg[inst.rs2()] });
         },
         // I-Type
