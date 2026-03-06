@@ -79,16 +79,27 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
     try test_load_elf(allocator, &cpu, elf_path);
     // std.debug.print("RAM:\n{f}", .{MemoryFmt{ .mem = &cpu.mem, .offset = 0x80001000, .size = 0x100 }});
 
+    const print = false;
     var i: usize = 0;
-    while (i < 0x1000) : (i += 1) {
-        const inst, const opt_exception = cpu.step_debug();
-        _ = inst;
-        // std.debug.print("{x:0>8}:  {x:0>8}  ", .{ cpu.pc, word });
-        // std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
-        if (opt_exception) |exception| {
-            switch (exception) {
-                .env_call_from_u_mode => return cpu,
-                else => return error.unexpected_trap,
+    while (i < 0x8000) : (i += 1) {
+        if (print) {
+            std.debug.print("{x:0>8}:  ", .{cpu.pc});
+            if (cpu.mem.read(u32, cpu.pc)) |word| {
+                const inst = Inst.init(word);
+                std.debug.print("{x:0>8}  ", .{word});
+                std.debug.print("{f}\n", .{InstFmt{ .addr = cpu.pc, .inst = inst }});
+            } else |_| {
+                std.debug.print("***\n", .{});
+            }
+        }
+        cpu.step();
+        const to_host_value = cpu.mem.read(u32, cpu.mem.inner.ram_offset) catch unreachable;
+        if (to_host_value != 0) {
+            if (to_host_value == 1) {
+                return cpu;
+            } else {
+                std.debug.print("fail code: {d}\n", .{to_host_value});
+                return error.fail;
             }
         }
     }
@@ -205,7 +216,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32ua-p-amoadd_w";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32ua-p-lrsc";
 
     const cpu = try test_exec_elf(allocator, elf_path);
     try expectEqual(0, cpu.regs[10]);
@@ -239,6 +250,14 @@ test "elfy" {
     while (try sections.next()) |section| {
         const name = try binary.getSectionName(section);
         const section_type = section.getType();
-        std.debug.print("Name: {s}, Type: {s}\n", .{ name, @tagName(section_type) });
+        std.debug.print("Section: {s}, Type: {s}\n", .{ name, @tagName(section_type) });
+    }
+
+    var symbols = try binary.getIterator(elfy.ElfSymbol);
+    while (try symbols.next()) |symbol| {
+        const name = try binary.getSymbolName(symbol);
+        const symbol_type = symbol.getType();
+        const value = symbol.getValue();
+        std.debug.print("Symbol: {s}, Type: {s}, Value: {x}\n", .{ name, @tagName(symbol_type), value });
     }
 }

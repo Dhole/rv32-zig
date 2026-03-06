@@ -210,6 +210,8 @@ pub const BasicMemory = struct {
     rom: []u8,
     ram_offset: u32,
     ram: []u8,
+    reservation_addr: u32,
+    reservation_valid: bool,
 
     const Self = @This();
 
@@ -222,25 +224,40 @@ pub const BasicMemory = struct {
             .rom = rom,
             .ram_offset = ram_offset,
             .ram = ram,
+            .reservation_addr = 0,
+            .reservation_valid = false,
         };
     }
 
-    pub fn read(self: *Self, comptime T: type, addr: u32) !T {
+    pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
         if (self.rom_offset <= addr and addr < self.rom_offset + self.rom.len) {
             return buf_read(T, self.rom, addr - self.rom_offset);
         } else if (self.ram_offset <= addr and addr < self.ram_offset + self.ram.len) {
             return buf_read(T, self.ram, addr - self.ram_offset);
         }
         debug.print("invalid read at {x:08}\n", .{addr});
-        return error.read_invalid_addr;
+        return error.ReadInvalidAddr;
     }
 
-    pub fn write(self: *Self, comptime T: type, addr: u32, v: T) !void {
+    pub fn write(self: *Self, comptime T: type, addr: u32, v: T) MemoryWriteError!void {
+        if ((addr & ~@as(u32, 0b11)) == self.reservation_addr) {
+            self.reservation_valid = false;
+        }
         if (self.ram_offset <= addr and addr < self.ram_offset + self.ram.len) {
             return buf_write(T, self.ram, addr - self.ram_offset, v);
         }
         debug.print("invalid write at {x:08}\n", .{addr});
-        return error.write_invalid_addr;
+        return error.WriteInvalidAddr;
+    }
+
+    pub fn reserve(self: *Self, addr: u32) void {
+        self.reservation_addr = addr;
+        self.reservation_valid = true;
+    }
+    pub fn validate_reservation(self: *Self, addr: u32) bool {
+        const valid = self.reservation_addr == addr and self.reservation_valid;
+        self.reservation_valid = false;
+        return valid;
     }
 
     pub fn deinit(self: *Self) void {
@@ -297,9 +314,12 @@ pub const MTVec = packed struct {
 };
 
 const ExceptionCode = enum(u31) {
+    inst_addr_misaligned = 0,
     inst_access_fault = 1,
     illegal_inst = 2,
+    load_addr_misaligned = 4,
     load_access_fault = 5,
+    store_amo_addr_misaligned = 6,
     store_amo_access_fault = 7,
     env_call_from_u_mode = 8,
     env_call_from_m_mode = 11,
@@ -377,7 +397,7 @@ const Csr = struct {
     fn read(self: *Self, mode: PrivilegeMode, addr: u12) !u32 {
         if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
             std.debug.print("CSR: Mode lower than required\n", .{});
-            return error.csr_read_priv;
+            return error.CsrReadPriv;
         }
         switch (addr) {
             MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE => {},
@@ -390,11 +410,11 @@ const Csr = struct {
     fn write(self: *Self, mode: PrivilegeMode, addr: u12, v: u32) !void {
         if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
             std.debug.print("CSR: Mode lower than required\n", .{});
-            return error.csr_write_priv;
+            return error.CsrWritePriv;
         }
         if (priv_table[addr].read_only) {
             std.debug.print("CSR: is read-only: {x:0>3}\n", .{addr});
-            return error.csr_write_ro;
+            return error.CsrWriteRo;
         }
         switch (addr) {
             MTVEC => {
@@ -419,15 +439,56 @@ pub const basic_config = Config{
 
 pub const BasicCpu = Cpu(basic_config);
 
+fn is_misaligned(comptime T: type, addr: u32) bool {
+    switch (T) {
+        u8 => {},
+        u16 => if ((addr & 0b1) != 0) {
+            return true;
+        },
+        u32 => if ((addr & 0b11) != 0) {
+            return true;
+        },
+        else => @compileError("invalid T"),
+    }
+    return false;
+}
+
+pub const MemoryReadError = error{
+    ReadMisaligned,
+    ReadInvalidAddr,
+};
+pub const MemoryWriteError = error{
+    WriteMisaligned,
+    WriteInvalidAddr,
+};
+
 pub fn MemoryInterface(comptime M: type) type {
     return struct {
         inner: M,
         const Self = @This();
-        pub fn read(self: *Self, comptime T: type, addr: u32) !T {
+        pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
+            if (is_misaligned(T, addr)) {
+                return error.ReadMisaligned;
+            }
             return self.inner.read(T, addr);
         }
-        pub fn write(self: *Self, comptime T: type, addr: u32, v: T) !void {
+        pub fn write(self: *Self, comptime T: type, addr: u32, v: T) MemoryWriteError!void {
+            if (is_misaligned(T, addr)) {
+                return error.WriteMisaligned;
+            }
             return self.inner.write(T, addr, v);
+        }
+        pub fn reserve(self: *Self, addr: u32) MemoryReadError!void {
+            if (is_misaligned(u32, addr)) {
+                return error.ReadMisaligned;
+            }
+            self.inner.reserve(addr);
+        }
+        pub fn validate_reservation(self: *Self, addr: u32) MemoryWriteError!bool {
+            if (is_misaligned(u32, addr)) {
+                return error.WriteMisaligned;
+            }
+            return self.inner.validate_reservation(addr);
         }
         pub fn deinit(self: *Self) void {
             self.inner.deinit();
@@ -475,6 +536,8 @@ pub fn Cpu(comptime cfg: Config) type {
             self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
             const mtvec: MTVec = @bitCast(self.csr.regs[Csr.MTVEC]);
             self.pc = mtvec.address();
+            // TODO: set the correct priv mode
+            self.priv_mode = .M;
         }
 
         pub fn step_debug(self: *Self) struct { ?Inst, ?ExceptionCode } {
@@ -484,7 +547,7 @@ pub fn Cpu(comptime cfg: Config) type {
                 opt_inst = inst;
                 break :blk self.exec(inst);
             } else |err| switch (err) {
-                error.read_invalid_addr => .inst_access_fault,
+                error.ReadInvalidAddr => .inst_access_fault,
             };
             if (opt_exception) |exception| {
                 self.handle_exception(exception);
@@ -497,7 +560,8 @@ pub fn Cpu(comptime cfg: Config) type {
                 const inst = Inst.init(word);
                 break :blk self.exec(inst);
             } else |err| switch (err) {
-                error.read_invalid_addr => .inst_access_fault,
+                error.ReadMisaligned => .inst_addr_misaligned,
+                error.ReadInvalidAddr => .inst_access_fault,
             };
             if (opt_exception) |exception| {
                 self.handle_exception(exception);
@@ -507,13 +571,15 @@ pub fn Cpu(comptime cfg: Config) type {
         pub fn exec(self: *Self, inst: Inst) ?ExceptionCode {
             self.exec_err(inst) catch |err| {
                 return switch (err) {
-                    error.read_invalid_addr => .load_access_fault,
-                    error.write_invalid_addr => .store_amo_access_fault,
-                    error.unk_inst => .illegal_inst,
-                    error.csr_read_priv => .illegal_inst,
-                    error.csr_write_priv => .illegal_inst,
-                    error.csr_write_ro => .illegal_inst,
-                    error.ecall => switch (self.priv_mode) {
+                    error.ReadMisaligned => .load_addr_misaligned,
+                    error.ReadInvalidAddr => .load_access_fault,
+                    error.WriteMisaligned => .store_amo_addr_misaligned,
+                    error.WriteInvalidAddr => .store_amo_access_fault,
+                    error.UnkInst => .illegal_inst,
+                    error.CsrReadPriv => .illegal_inst,
+                    error.CsrWritePriv => .illegal_inst,
+                    error.CsrWriteRo => .illegal_inst,
+                    error.Ecall => switch (self.priv_mode) {
                         .M => .env_call_from_m_mode,
                         .U => .env_call_from_u_mode,
                         else => @panic("Unsupported"),
@@ -545,7 +611,7 @@ pub fn Cpu(comptime cfg: Config) type {
                         self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
                         self.regs[inst.rd()] = next;
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b1100011 => switch (inst.funct3()) {
                     0b000 => { // BEQ
@@ -600,7 +666,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.pc +%= 4;
                         }
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b0000011 => switch (inst.funct3()) {
                     0b000 => { // LB
@@ -630,7 +696,7 @@ pub fn Cpu(comptime cfg: Config) type {
                         self.regs[inst.rd()] = @as(u32, try self.mem.read(u16, self.regs[inst.rs1()] +% imm));
                         self.pc +%= 4;
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b0100011 => switch (inst.funct3()) {
                     0b000 => { // SB
@@ -648,7 +714,7 @@ pub fn Cpu(comptime cfg: Config) type {
                         try self.mem.write(u32, self.regs[inst.rs1()] +% imm, self.regs[inst.rs2()]);
                         self.pc +%= 4;
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b0010011 => switch (inst.funct3()) {
                     0b000 => { // ADDI
@@ -687,7 +753,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = self.regs[inst.rs1()] << inst.shamt();
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b101 => switch (inst.funct7()) {
                         0b0000000 => { // SRLI
@@ -699,7 +765,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = @bitCast(rs1 >> inst.shamt());
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                 },
                 0b0110011 => switch (inst.funct3()) {
@@ -716,7 +782,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = self.regs[inst.rs1()] *% self.regs[inst.rs2()];
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b001 => switch (inst.funct7()) {
                         0b0000000 => { // SLL
@@ -730,7 +796,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = @truncate(rd >> 32);
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b010 => switch (inst.funct7()) {
                         0b0000000 => { // SLT
@@ -745,7 +811,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = @truncate(rd >> 32);
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b011 => switch (inst.funct7()) {
                         0b0000000 => { // SLTU
@@ -760,7 +826,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.regs[inst.rd()] = @truncate(@as(u64, rs1) * @as(u64, rs2) >> 32);
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b100 => switch (inst.funct7()) {
                         0b0000000 => { // XOR
@@ -778,7 +844,7 @@ pub fn Cpu(comptime cfg: Config) type {
                                 @bitCast(@divTrunc(rs1, rs2));
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b101 => switch (inst.funct7()) {
                         0b0000000 => { // SRL
@@ -798,7 +864,7 @@ pub fn Cpu(comptime cfg: Config) type {
                                 self.regs[inst.rs1()] / rs2;
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b110 => switch (inst.funct7()) {
                         0b0000000 => { // OR
@@ -816,7 +882,7 @@ pub fn Cpu(comptime cfg: Config) type {
                                 @bitCast(@rem(rs1, rs2));
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b111 => switch (inst.funct7()) {
                         0b0000000 => { // AND
@@ -832,13 +898,13 @@ pub fn Cpu(comptime cfg: Config) type {
                                 rs1 % rs2;
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                 },
                 0b1110011 => switch (inst.funct3()) {
                     0b000 => switch (inst.funct12()) {
                         0b000000000000 => { // ECALL
-                            return error.ecall;
+                            return error.Ecall;
                         },
                         0b000000000001 => { // EBREAK
                             log_debug(@src(), "Unimplemented ebreak", .{});
@@ -862,7 +928,7 @@ pub fn Cpu(comptime cfg: Config) type {
                             log_debug(@src(), "Unimplemented wfi", .{});
                             self.pc +%= 4;
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
                     0b001 => { // CSRRW,
                         if (inst.rd() != 0) {
@@ -922,24 +988,55 @@ pub fn Cpu(comptime cfg: Config) type {
                         }
                         self.pc +%= 4;
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b0101111 => switch (inst.funct3()) {
                     // TODO miss-aligned address exception
                     0b10 => switch (inst.funct5()) {
                         0b00010 => { // LR_W
+                            const rs1 = self.regs[inst.rs1()];
+                            const v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            try self.mem.reserve(rs1);
                             self.pc +%= 4;
-                            @panic("TODO LR_W");
                         },
                         0b00011 => { // SC_W
+                            const rs1 = self.regs[inst.rs1()];
+                            const valid = try self.mem.validate_reservation(rs1);
+                            if (valid) {
+                                const rs2 = self.regs[inst.rs2()];
+                                try self.mem.write(u32, rs1, rs2);
+                                self.regs[inst.rd()] = 0;
+                            } else {
+                                self.regs[inst.rd()] = 1;
+                            }
                             self.pc +%= 4;
-                            @panic("TODO SC_W");
                         },
                         0b00001 => { // AMOSWAP_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = self.regs[inst.rs2()];
+                            try self.mem.write(u32, rs1, v);
                             self.pc +%= 4;
-                            @panic("TODO AMOSWAP_W");
                         },
                         0b00000 => { // AMOADD_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = v +% self.regs[inst.rs2()];
+                            try self.mem.write(u32, rs1, v);
+                            self.pc +%= 4;
+                        },
+                        0b00100 => { // AMOXOR_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = v ^ self.regs[inst.rs2()];
+                            try self.mem.write(u32, rs1, v);
+                            self.pc +%= 4;
+                        },
+                        0b01100 => { // AMOAND_W
                             const rs1 = self.regs[inst.rs1()];
                             var v = try self.mem.read(u32, rs1);
                             self.regs[inst.rd()] = v;
@@ -947,37 +1044,51 @@ pub fn Cpu(comptime cfg: Config) type {
                             try self.mem.write(u32, rs1, v);
                             self.pc +%= 4;
                         },
-                        0b00100 => { // AMOXOR_W
-                            self.pc +%= 4;
-                            @panic("TODO AMOXOR_W");
-                        },
-                        0b01100 => { // AMOAND_W
-                            self.pc +%= 4;
-                            @panic("TODO AMOAND_W");
-                        },
                         0b01000 => { // AMOOR_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = v | self.regs[inst.rs2()];
+                            try self.mem.write(u32, rs1, v);
                             self.pc +%= 4;
-                            @panic("TODO AMOOR_W");
                         },
                         0b10000 => { // AMOMIN_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v: i32 = @bitCast(try self.mem.read(u32, rs1));
+                            self.regs[inst.rd()] = @bitCast(v);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            v = @min(v, rs2);
+                            try self.mem.write(u32, rs1, @bitCast(v));
                             self.pc +%= 4;
-                            @panic("TODO AMOMIN_W");
                         },
                         0b10100 => { // AMOMAX_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v: i32 = @bitCast(try self.mem.read(u32, rs1));
+                            self.regs[inst.rd()] = @bitCast(v);
+                            const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
+                            v = @max(v, rs2);
+                            try self.mem.write(u32, rs1, @bitCast(v));
                             self.pc +%= 4;
-                            @panic("TODO AMOMAX_W");
                         },
                         0b11000 => { // AMOMINU_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = @min(v, self.regs[inst.rs2()]);
+                            try self.mem.write(u32, rs1, v);
                             self.pc +%= 4;
-                            @panic("TODO AMOMINU_W");
                         },
                         0b11100 => { // AMOMAXU_W
+                            const rs1 = self.regs[inst.rs1()];
+                            var v = try self.mem.read(u32, rs1);
+                            self.regs[inst.rd()] = v;
+                            v = @max(v, self.regs[inst.rs2()]);
+                            try self.mem.write(u32, rs1, v);
                             self.pc +%= 4;
-                            @panic("TODO AMOMAXU_W");
                         },
-                        else => return error.unk_inst,
+                        else => return error.UnkInst,
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
                 0b0001111 => switch (inst.funct3()) {
                     0b000 => { // FENCE
@@ -986,9 +1097,9 @@ pub fn Cpu(comptime cfg: Config) type {
                     0b001 => { // FENCEI
                         self.pc +%= 4;
                     },
-                    else => return error.unk_inst,
+                    else => return error.UnkInst,
                 },
-                else => return error.unk_inst,
+                else => return error.UnkInst,
             }
             self.regs[0] = 0;
         }
