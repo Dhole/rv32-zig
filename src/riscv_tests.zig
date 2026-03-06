@@ -70,7 +70,7 @@ fn test_load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
     }
 }
 
-fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
+fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !void {
     const mem_config = if (std.mem.containsAtLeast(u8, elf_path, 1, "ld_st"))
         "b"
     else
@@ -96,14 +96,14 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !Cpu {
         const to_host_value = cpu.mem.read(u32, cpu.mem.inner.ram_offset) catch unreachable;
         if (to_host_value != 0) {
             if (to_host_value == 1) {
-                return cpu;
+                return;
             } else {
                 std.debug.print("fail code: {d}\n", .{to_host_value});
-                return error.fail;
+                return error.Fail;
             }
         }
     }
-    return error.too_many_steps;
+    return error.TooManySteps;
 }
 
 test "rv32ui" {
@@ -158,9 +158,7 @@ test "rv32ui" {
         std.debug.print("> {s}\n", .{op_str});
         const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ui-p-{s}", .{op_str});
 
-        const cpu = try test_exec_elf(allocator, elf_path);
-        // try expectEqual(0, cpu.regs[10]); // a0
-        try expectEqual(1, cpu.regs[3]); // gp
+        try test_exec_elf(allocator, elf_path);
     }
 }
 
@@ -182,8 +180,7 @@ test "rv32um" {
         std.debug.print("> {s}\n", .{op_str});
         const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32um-p-{s}", .{op_str});
 
-        const cpu = try test_exec_elf(allocator, elf_path);
-        try expectEqual(0, cpu.regs[10]);
+        try test_exec_elf(allocator, elf_path);
     }
 }
 
@@ -207,8 +204,57 @@ test "rv32ua" {
         std.debug.print("> {s}\n", .{op_str});
         const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32ua-p-{s}", .{op_str});
 
-        const cpu = try test_exec_elf(allocator, elf_path);
-        try expectEqual(0, cpu.regs[10]);
+        try test_exec_elf(allocator, elf_path);
+    }
+}
+
+test "rv32mi" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+
+    const ops_str = [_][]const u8{
+        "breakpoint", // TODO
+        "csr", // TODO
+        "illegal", // TODO
+        "instret_overflow", // TODO
+        "lh-misaligned",
+        "lw-misaligned",
+        "ma_addr",
+        "ma_fetch", // TODO
+        "mcsr", // TODO
+        "pmpaddr",
+        "sbreak", // TODO
+        "scall",
+        "shamt",
+        "sh-misaligned",
+        "sw-misaligned",
+        "zicntr",
+    };
+    for (ops_str) |op_str| {
+        std.debug.print("> {s}\n", .{op_str});
+        const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32mi-p-{s}", .{op_str});
+
+        try test_exec_elf(allocator, elf_path);
+    }
+}
+
+test "rv32si" {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+
+    const ops_str = [_][]const u8{
+        "csr", // TODO
+        "dirty", // TODO
+        "ma_fetch", // TODO
+        "sbreak", // TODO
+        "scall", // TODO
+        "wfi", // TODO
+    };
+    for (ops_str) |op_str| {
+        std.debug.print("> {s}\n", .{op_str});
+        const elf_path = try std.fmt.allocPrint(allocator, "riscv-tests/isa/rv32si-p-{s}", .{op_str});
+
+        try test_exec_elf(allocator, elf_path);
     }
 }
 
@@ -218,8 +264,7 @@ test "rv32_single" {
 
     const elf_path: []const u8 = "riscv-tests/isa/rv32ua-p-lrsc";
 
-    const cpu = try test_exec_elf(allocator, elf_path);
-    try expectEqual(0, cpu.regs[10]);
+    try test_exec_elf(allocator, elf_path);
 }
 
 test "elfy" {
