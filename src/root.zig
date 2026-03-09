@@ -299,6 +299,9 @@ pub const MStatus = packed struct {
     sd: u1,
 };
 
+pub const MSTATUS_MASK: u32 = 0b1_000000_1_1_1_1_1_1_1_1_11_11_11_11_1_1_1_1_0_1_0_1_0;
+pub const SSTATUS_MASK: u32 = 0b1_000000_1_1_000_1_1_0_11_11_00_11_1_0_1_1_000_1_0;
+
 pub const MTVec = packed struct {
     const Mode = enum(u2) {
         direct = 0,
@@ -313,10 +316,11 @@ pub const MTVec = packed struct {
     }
 };
 
-const ExceptionCode = enum(u31) {
+const ExceptionCode = enum(u6) {
     inst_addr_misaligned = 0,
     inst_access_fault = 1,
     illegal_inst = 2,
+    breakpoint = 3,
     load_addr_misaligned = 4,
     load_access_fault = 5,
     store_amo_addr_misaligned = 6,
@@ -328,6 +332,7 @@ const ExceptionCode = enum(u31) {
 
 pub const MCause = packed struct {
     exception: ExceptionCode,
+    reserved: u25,
     interrupt: u1,
 };
 
@@ -352,10 +357,26 @@ const Csr = struct {
     const MIDELEG: u12 = 0x303;
     const MIE: u12 = 0x304;
     const MTVEC: u12 = 0x305;
+    const MEDELEGH: u12 = 0x312;
     // Machine Trap Handling
+    const MSCRATCH: u12 = 0x340;
     const MEPC: u12 = 0x341;
     const MCAUSE: u12 = 0x342;
+    const MIP: u12 = 0x344;
+    // Debug/Trace Registers (shared with Debug Mode)
+    const TSELECT: u12 = 0x7A0;
+    const TDATA1: u12 = 0x7A1;
+    const TDATA2: u12 = 0x7A2;
+    const TCONTROL: u12 = 0x7A5;
 
+    // Supervisor Trap Setup
+    const SSTATUS: u12 = 0x100;
+    const STVEC: u12 = 0x105;
+    // Supervisor Trap Handling
+    const SSCRATCH: u12 = 0x140;
+    const SEPC: u12 = 0x141;
+    const SCAUSE: u12 = 0x142;
+    const STVAL: u12 = 0x143;
     // Supervisor Protection and Translation
     const SATP: u12 = 0x180;
 
@@ -370,13 +391,28 @@ const Csr = struct {
         table[MIDELEG] = .{ .mode = .M, .read_only = false };
         table[MIE] = .{ .mode = .M, .read_only = false };
         table[MTVEC] = .{ .mode = .M, .read_only = false };
+        table[MEDELEGH] = .{ .mode = .M, .read_only = false };
 
+        table[MSCRATCH] = .{ .mode = .M, .read_only = false };
         table[MEPC] = .{ .mode = .M, .read_only = false };
         table[MCAUSE] = .{ .mode = .M, .read_only = false };
+        table[MIP] = .{ .mode = .M, .read_only = false };
+
+        table[TSELECT] = .{ .mode = .M, .read_only = false };
+        table[TDATA1] = .{ .mode = .M, .read_only = false };
+        table[TDATA2] = .{ .mode = .M, .read_only = false };
+        table[TCONTROL] = .{ .mode = .M, .read_only = false };
 
         table[PMPCFG0] = .{ .mode = .M, .read_only = false };
         table[PMPADDR0] = .{ .mode = .M, .read_only = false };
 
+        table[SSTATUS] = .{ .mode = .S, .read_only = false };
+        table[STVEC] = .{ .mode = .S, .read_only = false };
+
+        table[SSCRATCH] = .{ .mode = .S, .read_only = false };
+        table[SEPC] = .{ .mode = .S, .read_only = false };
+        table[SCAUSE] = .{ .mode = .S, .read_only = false };
+        table[STVAL] = .{ .mode = .S, .read_only = false };
         table[SATP] = .{ .mode = .S, .read_only = false };
 
         return table;
@@ -396,33 +432,52 @@ const Csr = struct {
 
     fn read(self: *Self, mode: PrivilegeMode, addr: u12) !u32 {
         if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
-            std.debug.print("CSR: Mode lower than required\n", .{});
+            std.debug.print("CSR read: Mode lower than required: {s} < {s}: {x:0>3} \n", .{
+                @tagName(mode),
+                @tagName(priv_table[addr].mode),
+                addr,
+            });
             return error.CsrReadPriv;
         }
         switch (addr) {
-            MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE => {},
+            MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE, MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, SSTATUS, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {},
             // MHARTID, MNSTATUS, SATP, PMPCFG0, PMPADDR0, MSTATUS, MEDELEG, MIDELEG, MIE, MTVEC, MEPC, MCAUSE => {},
             else => std.debug.print("Unimplemented  read csr {x:0>3}\n", .{addr}),
         }
         return self.regs[addr];
     }
 
-    fn write(self: *Self, mode: PrivilegeMode, addr: u12, v: u32) !void {
+    fn write(self: *Self, mode: PrivilegeMode, addr: u12, value: u32) !void {
         if (@intFromEnum(mode) < @intFromEnum(priv_table[addr].mode)) {
-            std.debug.print("CSR: Mode lower than required\n", .{});
+            std.debug.print("CSR write: Mode lower than required: {s} < {s}: {x:0>3} \n", .{
+                @tagName(mode),
+                @tagName(priv_table[addr].mode),
+                addr,
+            });
             return error.CsrWritePriv;
         }
         if (priv_table[addr].read_only) {
             std.debug.print("CSR: is read-only: {x:0>3}\n", .{addr});
             return error.CsrWriteRo;
         }
+        var v = value;
         switch (addr) {
             MTVEC => {
                 const mtvec: MTVec = @bitCast(v);
-                if (mtvec.mode != .direct) {
-                    std.debug.panic("Unimplemented mtvec.mode={s}", .{@tagName(mtvec.mode)});
+                switch (mtvec.mode) {
+                    _ => std.debug.panic("Invalid mtvec.mode={d}", .{@intFromEnum(mtvec.mode)}),
+                    else => {},
                 }
             },
+            MSTATUS => {
+                v = v & MSTATUS_MASK;
+                self.regs[SSTATUS] = v & SSTATUS_MASK;
+            },
+            SSTATUS => {
+                v = v & SSTATUS_MASK;
+                self.regs[MSTATUS] = (self.regs[MSTATUS] & ~SSTATUS_MASK) | v;
+            },
+            MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, MEPC, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {},
             else => std.debug.print("Unimplemented write csr {x:0>3}\n", .{addr}),
         }
         self.regs[addr] = v;
@@ -526,18 +581,36 @@ pub fn Cpu(comptime cfg: Config) type {
         }
 
         pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
-            self.csr.regs[Csr.MEPC] = self.pc;
-            self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
-            // Set MTVAL to 0?
             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
-            mstatus.mpp = @intFromEnum(self.priv_mode);
-            mstatus.mpie = mstatus.mie;
-            mstatus.mie = 0;
+            var tvec: MTVec = undefined;
+            const medeleg = @as(u64, self.csr.regs[Csr.MEDELEG]) | @as(u64, self.csr.regs[Csr.MEDELEGH]) << 32;
+            if (self.priv_mode == .S and (medeleg & (@as(u64, 1) << @intFromEnum(exception))) != 0) {
+                self.csr.regs[Csr.SEPC] = self.pc;
+                self.csr.regs[Csr.SCAUSE] = @as(u32, @intFromEnum(exception));
+                // TODO: the stval register is written with an exception-specific datum
+                mstatus.spp = @truncate(@intFromEnum(self.priv_mode));
+                mstatus.spie = mstatus.mie;
+                mstatus.sie = 0;
+                tvec = @bitCast(self.csr.regs[Csr.STVEC]);
+                self.priv_mode = .S;
+            } else {
+                self.csr.regs[Csr.MEPC] = self.pc;
+                self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
+                // Set MTVAL to 0?
+                mstatus.mpp = @intFromEnum(self.priv_mode);
+                mstatus.mpie = mstatus.mie;
+                mstatus.mie = 0;
+                tvec = @bitCast(self.csr.regs[Csr.MTVEC]);
+                self.priv_mode = .M;
+            }
+            const tvec_address = tvec.address();
+            self.pc = switch (tvec.mode) {
+                .direct => tvec_address,
+                .vectored => tvec_address + 4 * @intFromEnum(exception),
+                _ => unreachable,
+            };
             self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
-            const mtvec: MTVec = @bitCast(self.csr.regs[Csr.MTVEC]);
-            self.pc = mtvec.address();
-            // TODO: set the correct priv mode
-            self.priv_mode = .M;
+            self.csr.regs[Csr.SSTATUS] = self.csr.regs[Csr.MSTATUS] & SSTATUS_MASK;
         }
 
         pub fn step_debug(self: *Self) struct { ?Inst, ?ExceptionCode } {
@@ -915,13 +988,17 @@ pub fn Cpu(comptime cfg: Config) type {
                             self.pc +%= 4;
                         },
                         0b000100000010 => { // SRET
-                            log_debug(@src(), "Unimplemented sret", .{});
-                            self.pc +%= 4;
+                            var sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
+                            self.priv_mode = @enumFromInt(sstatus.mpp);
+                            sstatus.mie = sstatus.mpie;
+                            self.csr.write(.S, Csr.SSTATUS, @bitCast(sstatus)) catch unreachable;
+                            self.pc = self.csr.regs[Csr.SEPC];
                         },
                         0b001100000010 => { // MRET
                             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
                             self.priv_mode = @enumFromInt(mstatus.mpp);
                             mstatus.mie = mstatus.mpie;
+                            self.csr.write(.M, Csr.MSTATUS, @bitCast(mstatus)) catch unreachable;
                             self.pc = self.csr.regs[Csr.MEPC];
                         },
                         0b000100000101 => { // WFI
@@ -931,30 +1008,33 @@ pub fn Cpu(comptime cfg: Config) type {
                         else => return error.UnkInst,
                     },
                     0b001 => { // CSRRW,
+                        const rs1 = self.regs[inst.rs1()];
                         if (inst.rd() != 0) {
                             const v = try self.csr.read(self.priv_mode, inst.csr());
                             self.regs[inst.rd()] = v;
                         }
-                        try self.csr.write(self.priv_mode, inst.csr(), self.regs[inst.rs1()]);
+                        try self.csr.write(self.priv_mode, inst.csr(), rs1);
                         self.pc +%= 4;
                     },
                     0b010 => { // CSRRS,
+                        const inst_rs1 = inst.rs1();
+                        const rs1 = self.regs[inst_rs1];
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
-                        const inst_rs1 = inst.rs1();
                         if (inst_rs1 != 0) {
-                            try self.csr.write(self.priv_mode, csr, v | self.regs[inst_rs1]);
+                            try self.csr.write(self.priv_mode, csr, v | rs1);
                         }
                         self.pc +%= 4;
                     },
                     0b011 => { // CSRRC,
+                        const inst_rs1 = inst.rs1();
+                        const rs1 = self.regs[inst_rs1];
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
-                        const inst_rs1 = inst.rs1();
                         if (inst_rs1 != 0) {
-                            try self.csr.write(self.priv_mode, csr, v & ~self.regs[inst_rs1]);
+                            try self.csr.write(self.priv_mode, csr, v & ~rs1);
                         }
                         self.pc +%= 4;
                     },

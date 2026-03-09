@@ -79,7 +79,7 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !void {
     try test_load_elf(allocator, &cpu, elf_path);
     // std.debug.print("RAM:\n{f}", .{MemoryFmt{ .mem = &cpu.mem, .offset = 0x80001000, .size = 0x100 }});
 
-    const print = false;
+    const print = true;
     var i: usize = 0;
     while (i < 0x8000) : (i += 1) {
         if (print) {
@@ -214,7 +214,7 @@ test "rv32mi" {
 
     const ops_str = [_][]const u8{
         "breakpoint", // TODO
-        "csr", // TODO
+        "csr",
         "illegal", // TODO
         "instret_overflow", // TODO
         "lh-misaligned",
@@ -243,7 +243,7 @@ test "rv32si" {
     const allocator = gpa.allocator();
 
     const ops_str = [_][]const u8{
-        "csr", // TODO
+        "csr",
         "dirty", // TODO
         "ma_fetch", // TODO
         "sbreak", // TODO
@@ -262,7 +262,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32ua-p-lrsc";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32mi-p-illegal";
 
     try test_exec_elf(allocator, elf_path);
 }
