@@ -212,6 +212,8 @@ pub const BasicMemory = struct {
     ram: []u8,
     reservation_addr: u32,
     reservation_valid: bool,
+    // The last fault address seen
+    fault_addr: u32,
 
     const Self = @This();
 
@@ -226,6 +228,7 @@ pub const BasicMemory = struct {
             .ram = ram,
             .reservation_addr = 0,
             .reservation_valid = false,
+            .fault_addr = 0,
         };
     }
 
@@ -236,6 +239,7 @@ pub const BasicMemory = struct {
             return buf_read(T, self.ram, addr - self.ram_offset);
         }
         debug.print("invalid read at {x:08}\n", .{addr});
+        self.fault_addr = addr;
         return error.ReadInvalidAddr;
     }
 
@@ -247,6 +251,7 @@ pub const BasicMemory = struct {
             return buf_write(T, self.ram, addr - self.ram_offset, v);
         }
         debug.print("invalid write at {x:08}\n", .{addr});
+        self.fault_addr = addr;
         return error.WriteInvalidAddr;
     }
 
@@ -362,6 +367,7 @@ const Csr = struct {
     const MSCRATCH: u12 = 0x340;
     const MEPC: u12 = 0x341;
     const MCAUSE: u12 = 0x342;
+    const MTVAL: u12 = 0x343;
     const MIP: u12 = 0x344;
     // Debug/Trace Registers (shared with Debug Mode)
     const TSELECT: u12 = 0x7A0;
@@ -396,6 +402,7 @@ const Csr = struct {
         table[MSCRATCH] = .{ .mode = .M, .read_only = false };
         table[MEPC] = .{ .mode = .M, .read_only = false };
         table[MCAUSE] = .{ .mode = .M, .read_only = false };
+        table[MTVAL] = .{ .mode = .M, .read_only = false };
         table[MIP] = .{ .mode = .M, .read_only = false };
 
         table[TSELECT] = .{ .mode = .M, .read_only = false };
@@ -460,27 +467,38 @@ const Csr = struct {
             std.debug.print("CSR: is read-only: {x:0>3}\n", .{addr});
             return error.CsrWriteRo;
         }
-        var v = value;
         switch (addr) {
             MTVEC => {
-                const mtvec: MTVec = @bitCast(v);
+                const mtvec: MTVec = @bitCast(value);
                 switch (mtvec.mode) {
                     _ => std.debug.panic("Invalid mtvec.mode={d}", .{@intFromEnum(mtvec.mode)}),
                     else => {},
                 }
             },
             MSTATUS => {
-                v = v & MSTATUS_MASK;
-                self.regs[SSTATUS] = v & SSTATUS_MASK;
+                self.set_mstatus(value);
+                return;
             },
             SSTATUS => {
-                v = v & SSTATUS_MASK;
-                self.regs[MSTATUS] = (self.regs[MSTATUS] & ~SSTATUS_MASK) | v;
+                self.set_sstatus(value);
+                return;
             },
             MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, MEPC, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {},
             else => std.debug.print("Unimplemented write csr {x:0>3}\n", .{addr}),
         }
-        self.regs[addr] = v;
+        self.regs[addr] = value;
+    }
+
+    fn set_mstatus(self: *Self, mstatus: u32) void {
+        const v = mstatus & MSTATUS_MASK;
+        self.regs[MSTATUS] = v;
+        self.regs[SSTATUS] = v & SSTATUS_MASK;
+    }
+
+    fn set_sstatus(self: *Self, sstatus: u32) void {
+        const v = sstatus & SSTATUS_MASK;
+        self.regs[SSTATUS] = v;
+        self.regs[MSTATUS] = (self.regs[MSTATUS] & ~SSTATUS_MASK) | v;
     }
 };
 
@@ -563,6 +581,8 @@ pub fn Cpu(comptime cfg: Config) type {
         priv_mode: PrivilegeMode,
         csr: Csr,
         mem: Memory,
+        // The last unknown instruction seen
+        unk_inst: u32,
 
         const Self = @This();
 
@@ -573,6 +593,7 @@ pub fn Cpu(comptime cfg: Config) type {
                 .priv_mode = .M,
                 .csr = Csr.init(),
                 .mem = Memory{ .inner = mem },
+                .unk_inst = 0,
             };
         }
 
@@ -581,13 +602,20 @@ pub fn Cpu(comptime cfg: Config) type {
         }
 
         pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
+            std.debug.print("DBG exception {s}\n", .{@tagName(exception)});
+            const tval = switch (exception) {
+                .load_addr_misaligned, .load_access_fault, .store_amo_addr_misaligned, .store_amo_access_fault => self.mem.inner.fault_addr,
+                .inst_addr_misaligned, .inst_access_fault, .breakpoint => self.pc,
+                .illegal_inst => self.unk_inst,
+                else => 0,
+            };
             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
             var tvec: MTVec = undefined;
             const medeleg = @as(u64, self.csr.regs[Csr.MEDELEG]) | @as(u64, self.csr.regs[Csr.MEDELEGH]) << 32;
             if (self.priv_mode == .S and (medeleg & (@as(u64, 1) << @intFromEnum(exception))) != 0) {
                 self.csr.regs[Csr.SEPC] = self.pc;
                 self.csr.regs[Csr.SCAUSE] = @as(u32, @intFromEnum(exception));
-                // TODO: the stval register is written with an exception-specific datum
+                self.csr.regs[Csr.STVAL] = tval;
                 mstatus.spp = @truncate(@intFromEnum(self.priv_mode));
                 mstatus.spie = mstatus.mie;
                 mstatus.sie = 0;
@@ -596,7 +624,7 @@ pub fn Cpu(comptime cfg: Config) type {
             } else {
                 self.csr.regs[Csr.MEPC] = self.pc;
                 self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
-                // Set MTVAL to 0?
+                self.csr.regs[Csr.MTVAL] = tval;
                 mstatus.mpp = @intFromEnum(self.priv_mode);
                 mstatus.mpie = mstatus.mie;
                 mstatus.mie = 0;
@@ -609,8 +637,7 @@ pub fn Cpu(comptime cfg: Config) type {
                 .vectored => tvec_address + 4 * @intFromEnum(exception),
                 _ => unreachable,
             };
-            self.csr.regs[Csr.MSTATUS] = @bitCast(mstatus);
-            self.csr.regs[Csr.SSTATUS] = self.csr.regs[Csr.MSTATUS] & SSTATUS_MASK;
+            self.csr.set_mstatus(@bitCast(mstatus));
         }
 
         pub fn step_debug(self: *Self) struct { ?Inst, ?ExceptionCode } {
@@ -644,11 +671,15 @@ pub fn Cpu(comptime cfg: Config) type {
         pub fn exec(self: *Self, inst: Inst) ?ExceptionCode {
             self.exec_err(inst) catch |err| {
                 return switch (err) {
+                    error.InstAddrMisaligned => .inst_addr_misaligned,
                     error.ReadMisaligned => .load_addr_misaligned,
                     error.ReadInvalidAddr => .load_access_fault,
                     error.WriteMisaligned => .store_amo_addr_misaligned,
                     error.WriteInvalidAddr => .store_amo_access_fault,
-                    error.UnkInst => .illegal_inst,
+                    error.UnkInst => blk: {
+                        self.unk_inst = @bitCast(inst);
+                        break :blk .illegal_inst;
+                    },
                     error.CsrReadPriv => .illegal_inst,
                     error.CsrWritePriv => .illegal_inst,
                     error.CsrWriteRo => .illegal_inst,
@@ -675,13 +706,21 @@ pub fn Cpu(comptime cfg: Config) type {
                 0b1101111 => { // JAL
                     self.regs[inst.rd()] = self.pc +% 4;
                     const imm: u32 = @bitCast(inst.signed_j_imm());
-                    self.pc +%= imm;
+                    const pc = self.pc +% imm;
+                    if (is_misaligned(u32, pc)) {
+                        return error.InstAddrMisaligned;
+                    }
+                    self.pc = pc;
                 },
                 0b1100111 => switch (inst.funct3()) {
                     0b000 => { // JALR
                         const next = self.pc +% 4;
                         const imm: u32 = @bitCast(inst.signed_i_imm());
-                        self.pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
+                        const pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
+                        if (is_misaligned(u32, pc)) {
+                            return error.InstAddrMisaligned;
+                        }
+                        self.pc = pc;
                         self.regs[inst.rd()] = next;
                     },
                     else => return error.UnkInst,
@@ -991,14 +1030,14 @@ pub fn Cpu(comptime cfg: Config) type {
                             var sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
                             self.priv_mode = @enumFromInt(sstatus.mpp);
                             sstatus.mie = sstatus.mpie;
-                            self.csr.write(.S, Csr.SSTATUS, @bitCast(sstatus)) catch unreachable;
+                            self.csr.set_sstatus(@bitCast(sstatus));
                             self.pc = self.csr.regs[Csr.SEPC];
                         },
                         0b001100000010 => { // MRET
                             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
                             self.priv_mode = @enumFromInt(mstatus.mpp);
                             mstatus.mie = mstatus.mpie;
-                            self.csr.write(.M, Csr.MSTATUS, @bitCast(mstatus)) catch unreachable;
+                            self.csr.set_mstatus(@bitCast(mstatus));
                             self.pc = self.csr.regs[Csr.MEPC];
                         },
                         0b000100000101 => { // WFI
@@ -1071,7 +1110,6 @@ pub fn Cpu(comptime cfg: Config) type {
                     else => return error.UnkInst,
                 },
                 0b0101111 => switch (inst.funct3()) {
-                    // TODO miss-aligned address exception
                     0b10 => switch (inst.funct5()) {
                         0b00010 => { // LR_W
                             const rs1 = self.regs[inst.rs1()];
