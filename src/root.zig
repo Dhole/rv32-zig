@@ -304,8 +304,33 @@ pub const MStatus = packed struct {
     sd: u1,
 };
 
-pub const MSTATUS_MASK: u32 = 0b1_000000_1_1_1_1_1_1_1_1_11_11_11_11_1_1_1_1_0_1_0_1_0;
-pub const SSTATUS_MASK: u32 = 0b1_000000_1_1_000_1_1_0_11_11_00_11_1_0_1_1_000_1_0;
+pub const MSTATUS_MASK: u32 = struct {
+    fn call() u32 {
+        var v: MStatus = @bitCast(@as(u32, 0xffffffff));
+        v.wpri0 = 0;
+        v.wpri2 = 0;
+        v.wpri4 = 0;
+        v.wpri25 = 0;
+        // Unimplemented: Address Translation and Protection
+        v.sum = 0;
+        v.mxr = 0;
+        return @bitCast(v);
+    }
+}.call();
+
+pub const SSTATUS_MASK: u32 = struct {
+    fn call() u32 {
+        var v: MStatus = @bitCast(@as(u32, MSTATUS_MASK));
+        v.mie = 0;
+        v.mpie = 0;
+        v.mpp = 0;
+        v.mprv = 0;
+        v.tvm = 0;
+        v.tw = 0;
+        v.tsr = 0;
+        return @bitCast(v);
+    }
+}.call();
 
 pub const MTVec = packed struct {
     const Mode = enum(u2) {
@@ -322,7 +347,9 @@ pub const MTVec = packed struct {
 };
 
 fn get_interrupt_code(v: u32) ?InterruptCode {
-    return if (v & (1 << @intFromEnum(InterruptCode.machine_ext)) != 0)
+    return if (v == 0)
+        null
+    else if (v & (1 << @intFromEnum(InterruptCode.machine_ext)) != 0)
         .machine_ext
     else if (v & (1 << @intFromEnum(InterruptCode.machine_soft)) != 0)
         .machine_soft
@@ -335,10 +362,13 @@ fn get_interrupt_code(v: u32) ?InterruptCode {
     else if (v & (1 << @intFromEnum(InterruptCode.supervisor_timer)) != 0)
         .supervisor_timer
     else
-        null;
+        unreachable;
 }
 
-const InterruptCode = enum(u6) {
+const MIP_MIE_MASK: u32 = 0b0_01010_10101_01010;
+const SIP_SIE_MASK: u32 = 0b0_00000_10001_00010;
+
+const InterruptCode = enum(u5) {
     supervisor_soft = 1,
     machine_soft = 3,
     supervisor_timer = 5,
@@ -348,7 +378,7 @@ const InterruptCode = enum(u6) {
     counter_overflow = 13,
 };
 
-const ExceptionCode = enum(u6) {
+const ExceptionCode = enum(u5) {
     inst_addr_misaligned = 0,
     inst_access_fault = 1,
     illegal_inst = 2,
@@ -363,13 +393,15 @@ const ExceptionCode = enum(u6) {
     _,
 };
 
+const MEDELEG_MASK: u32 = 0b0_00000_11111_11111;
+
 pub const Cause = packed struct {
     code: packed union {
         exception: ExceptionCode,
         interrupt: InterruptCode,
-        v: u6,
+        v: u5,
     },
-    reserved: u25,
+    reserved: u26,
     interrupt: u1,
 };
 
@@ -408,6 +440,7 @@ const Csr = struct {
     const MIDELEG: u12 = 0x303;
     const MIE: u12 = 0x304;
     const MTVEC: u12 = 0x305;
+    const MCOUNTEREN: u12 = 0x306;
     const MEDELEGH: u12 = 0x312;
     // Machine Trap Handling
     const MSCRATCH: u12 = 0x340;
@@ -423,12 +456,15 @@ const Csr = struct {
 
     // Supervisor Trap Setup
     const SSTATUS: u12 = 0x100;
+    const SIE: u12 = 0x104;
     const STVEC: u12 = 0x105;
+    const SCOUNTEREN: u12 = 0x106;
     // Supervisor Trap Handling
     const SSCRATCH: u12 = 0x140;
     const SEPC: u12 = 0x141;
     const SCAUSE: u12 = 0x142;
     const STVAL: u12 = 0x143;
+    const SIP: u12 = 0x144;
     // Supervisor Protection and Translation
     const SATP: u12 = 0x180;
 
@@ -444,6 +480,7 @@ const Csr = struct {
         table[MIDELEG] = .{ .mode = .M, .read_only = false };
         table[MIE] = .{ .mode = .M, .read_only = false };
         table[MTVEC] = .{ .mode = .M, .read_only = false };
+        table[MCOUNTEREN] = .{ .mode = .M, .read_only = false };
         table[MEDELEGH] = .{ .mode = .M, .read_only = false };
 
         table[MSCRATCH] = .{ .mode = .M, .read_only = false };
@@ -461,12 +498,15 @@ const Csr = struct {
         table[PMPADDR0] = .{ .mode = .M, .read_only = false };
 
         table[SSTATUS] = .{ .mode = .S, .read_only = false };
+        table[SIE] = .{ .mode = .S, .read_only = false };
         table[STVEC] = .{ .mode = .S, .read_only = false };
+        table[SCOUNTEREN] = .{ .mode = .S, .read_only = false };
 
         table[SSCRATCH] = .{ .mode = .S, .read_only = false };
         table[SEPC] = .{ .mode = .S, .read_only = false };
         table[SCAUSE] = .{ .mode = .S, .read_only = false };
         table[STVAL] = .{ .mode = .S, .read_only = false };
+        table[SIP] = .{ .mode = .S, .read_only = false };
         table[SATP] = .{ .mode = .S, .read_only = false };
 
         return table;
@@ -495,9 +535,9 @@ const Csr = struct {
             return error.CsrReadPriv;
         }
         switch (addr) {
-            MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE, MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, SSTATUS, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {},
-            // MHARTID, MNSTATUS, SATP, PMPCFG0, PMPADDR0, MSTATUS, MEDELEG, MIDELEG, MIE, MTVEC, MEPC, MCAUSE => {},
-            else => std.debug.print("Unimplemented  read csr {x:0>3}\n", .{addr}),
+            MHARTID, MSTATUS, MTVEC, MEPC, MCAUSE, MTVAL, MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, SSTATUS, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL, SATP => {},
+            // MHARTID, MNSTATUS, PMPCFG0, PMPADDR0, MSTATUS, MEDELEG, MIDELEG, MIE, MTVEC, MEPC, MCAUSE => {},
+            else => std.debug.print("TODO: Unimplemented  read csr {x:0>3}\n", .{addr}),
         }
         return self.regs[addr];
     }
@@ -522,28 +562,54 @@ const Csr = struct {
                     _ => std.debug.panic("Invalid mtvec.mode={d}", .{@intFromEnum(mtvec.mode)}),
                     else => {},
                 }
+                self.regs[MTVEC] = value;
             },
             MISA => {
                 self.regs[addr] = @bitCast(MISA_VAL);
-                return;
             },
             TSELECT, TDATA1, TDATA2, TCONTROL => {
                 // Hardwire debug/trigger CSRs to zero because we don't support them
                 self.regs[addr] = 0;
-                return;
+            },
+            MIP => {
+                self.set_mip(value);
+            },
+            MIE => {
+                self.set_mie(value);
+            },
+            SIP => {
+                self.set_sip(value);
+            },
+            SIE => {
+                self.set_sie(value);
             },
             MSTATUS => {
                 self.set_mstatus(value);
-                return;
             },
             SSTATUS => {
                 self.set_sstatus(value);
-                return;
             },
-            MSCRATCH, MIDELEG, MEDELEG, MEDELEGH, MEPC, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {},
-            else => std.debug.print("Unimplemented write csr {x:0>3}\n", .{addr}),
+            MIDELEG => {
+                self.set_mideleg(value);
+            },
+            MEDELEG => {
+                self.set_medeleg(value);
+            },
+            MEDELEGH => {
+                self.regs[MEDELEGH] = 0;
+            },
+            MSCRATCH, MEPC, STVEC, SSCRATCH, SEPC, SCAUSE, STVAL => {
+                self.regs[addr] = value;
+            },
+            SATP => {
+                // Hardwired to zero until we support Address Translation and Protection
+                self.regs[SATP] = 0;
+            },
+            else => {
+                std.debug.print("TODO: Unimplemented write csr {x:0>3}\n", .{addr});
+                self.regs[addr] = value;
+            },
         }
-        self.regs[addr] = value;
     }
 
     fn set_mstatus(self: *Self, mstatus: u32) void {
@@ -556,6 +622,39 @@ const Csr = struct {
         const v = sstatus & SSTATUS_MASK;
         self.regs[SSTATUS] = v;
         self.regs[MSTATUS] = (self.regs[MSTATUS] & ~SSTATUS_MASK) | v;
+    }
+
+    fn set_medeleg(self: *Self, value: u32) void {
+        const v = value & MEDELEG_MASK;
+        self.regs[MEDELEG] = v;
+    }
+
+    fn set_mip(self: *Self, value: u32) void {
+        const v = value & MIP_MIE_MASK;
+        self.regs[MIP] = v;
+        self.regs[SIP] = v & self.regs[MIDELEG];
+    }
+    fn set_mie(self: *Self, value: u32) void {
+        const v = value & MIP_MIE_MASK;
+        self.regs[MIE] = v;
+        self.regs[SIE] = v & self.regs[MIDELEG];
+    }
+    fn set_mideleg(self: *Self, value: u32) void {
+        const v = value & SIP_SIE_MASK;
+        self.regs[MIDELEG] = v;
+        self.regs[SIP] = self.regs[MIP] & v;
+        self.regs[SIE] = self.regs[MIE] & v;
+    }
+
+    fn set_sip(self: *Self, value: u32) void {
+        const v = value & self.regs[MIDELEG];
+        self.regs[SIP] = v;
+        self.regs[MIP] = (self.regs[MIP] & ~self.regs[MIDELEG]) | v;
+    }
+    fn set_sie(self: *Self, value: u32) void {
+        const v = value & SIP_SIE_MASK;
+        self.regs[SIE] = v;
+        self.regs[SIE] = (self.regs[SIE] & ~self.regs[MIDELEG]) | v;
     }
 
     fn requires_check_interrupt(addr: u32) bool {
@@ -668,36 +767,71 @@ pub fn Cpu(comptime cfg: Config) type {
         }
 
         pub fn check_interrupt(self: *Self) void {
+            // Trap in Machine Mode:
             // (a) either the current privilege mode is M and the MIE bit in the mstatus
             // register is set, or the current privilege mode has less privilege than
             // M-mode
-            if (self.priv_mode == .M) {
-                const mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
-                if (mstatus.mie == 0) {
-                    return;
-                }
-            }
             // (b) bit i is set in both mip and mie
             // (c) if register mideleg exists, bit i is not set in mideleg.
-            const mip = self.csr.regs[Csr.MIP];
-            const mie = self.csr.regs[Csr.MIE];
-            const mideleg = self.csr.regs[Csr.MIDELEG];
-            if (get_interrupt_code(mip & mie & ~mideleg)) |interrupt| {
-                self.handle_interrupt(interrupt);
+            //
+            // Trap in Supervisor Mode:
+            // (a) either the current privilege mode is S and the SIE bit in
+            // the sstatus register is set, or the current privilege mode has
+            // less privilege than S-mode
+            // (b) bit i is set in both sip and sie.
+            switch (self.priv_mode) {
+                .M => {
+                    const mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                    if (mstatus.mie == 0) {
+                        return;
+                    }
+                    const mip = self.csr.regs[Csr.MIP];
+                    const mie = self.csr.regs[Csr.MIE];
+                    const mideleg = self.csr.regs[Csr.MIDELEG];
+                    if (get_interrupt_code(mip & mie & ~mideleg)) |interrupt| {
+                        self.handle_interrupt(interrupt, .M);
+                    }
+                },
+                .S => {
+                    const sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
+                    if (sstatus.sie == 0) {
+                        return;
+                    }
+                    const sip = self.csr.regs[Csr.SIP];
+                    const sie = self.csr.regs[Csr.SIE];
+                    if (get_interrupt_code(sip & sie)) |interrupt| {
+                        self.handle_interrupt(interrupt, .S);
+                    }
+                },
+                .U => {
+                    const mip = self.csr.regs[Csr.MIP];
+                    const mie = self.csr.regs[Csr.MIE];
+                    const mideleg = self.csr.regs[Csr.MIDELEG];
+                    if (get_interrupt_code(mip & mie)) |interrupt| {
+                        const deleg = (mideleg & (@as(u32, 1) << @intFromEnum(interrupt))) != 0;
+                        const mode: PrivilegeMode = if (deleg) .S else .M;
+                        self.handle_interrupt(interrupt, mode);
+                    }
+                },
+                _ => unreachable,
             }
         }
 
-        pub fn handle_interrupt(self: *Self, interrupt: InterruptCode) void {
+        pub fn handle_interrupt(self: *Self, interrupt: InterruptCode, mode: PrivilegeMode) void {
             std.debug.print("DBG interrupt {s}\n", .{@tagName(interrupt)});
             self.handle_trap(Cause{
                 .code = .{ .interrupt = interrupt },
                 .reserved = 0,
                 .interrupt = 1,
-            }, 0);
+            }, mode, 0);
         }
 
         pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
             std.debug.print("DBG exception {s}\n", .{@tagName(exception)});
+            const medeleg = @as(u64, self.csr.regs[Csr.MEDELEG]) | @as(u64, self.csr.regs[Csr.MEDELEGH]) << 32;
+            const low_priv = @intFromEnum(self.priv_mode) < @intFromEnum(PrivilegeMode.M);
+            const deleg = (medeleg & (@as(u64, 1) << @intFromEnum(exception))) != 0;
+            const mode: PrivilegeMode = if (low_priv and deleg) .S else .M;
             const tval = switch (exception) {
                 .load_addr_misaligned, .load_access_fault, .store_amo_addr_misaligned, .store_amo_access_fault => self.mem.inner.fault_addr,
                 .inst_addr_misaligned, .inst_access_fault, .breakpoint => self.fault_addr,
@@ -708,14 +842,14 @@ pub fn Cpu(comptime cfg: Config) type {
                 .code = .{ .exception = exception },
                 .reserved = 0,
                 .interrupt = 0,
-            }, tval);
+            }, mode, tval);
         }
 
-        pub fn handle_trap(self: *Self, cause: Cause, tval: u32) void {
+        pub fn handle_trap(self: *Self, cause: Cause, mode: PrivilegeMode, tval: u32) void {
+            std.debug.print("DBG trap to {s} mode\n", .{@tagName(mode)});
             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
             var tvec: MTVec = undefined;
-            const medeleg = @as(u64, self.csr.regs[Csr.MEDELEG]) | @as(u64, self.csr.regs[Csr.MEDELEGH]) << 32;
-            if (self.priv_mode == .S and (medeleg & (@as(u64, 1) << cause.code.v)) != 0) {
+            if (mode == .S) {
                 self.csr.regs[Csr.SEPC] = self.pc;
                 self.csr.regs[Csr.SCAUSE] = @bitCast(cause);
                 self.csr.regs[Csr.STVAL] = tval;
@@ -1166,16 +1300,17 @@ pub fn Cpu(comptime cfg: Config) type {
                             return error.Ecall;
                         },
                         0b000000000001 => { // EBREAK
-                            log_debug(@src(), "Unimplemented ebreak", .{});
+                            log_debug(@src(), "TODO: Unimplemented ebreak", .{});
                             self.pc +%= 4;
                         },
                         0b000000000010 => { // URET
-                            log_debug(@src(), "Unimplemented uret", .{});
+                            log_debug(@src(), "TODO: Unimplemented uret", .{});
                             self.pc +%= 4;
                         },
                         0b000100000010 => { // SRET
                             var sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
                             self.priv_mode = @enumFromInt(sstatus.spp);
+                            std.debug.print("DBG return to {s} mode\n", .{@tagName(self.priv_mode)});
                             sstatus.sie = sstatus.spie;
                             self.csr.set_sstatus(@bitCast(sstatus));
                             self.pc = self.csr.regs[Csr.SEPC];
@@ -1184,6 +1319,7 @@ pub fn Cpu(comptime cfg: Config) type {
                         0b001100000010 => { // MRET
                             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
                             self.priv_mode = @enumFromInt(mstatus.mpp);
+                            std.debug.print("DBG return to {s} mode\n", .{@tagName(self.priv_mode)});
                             mstatus.mie = mstatus.mpie;
                             self.csr.set_mstatus(@bitCast(mstatus));
                             self.pc = self.csr.regs[Csr.MEPC];
@@ -1198,7 +1334,7 @@ pub fn Cpu(comptime cfg: Config) type {
                                     return error.UnkInst;
                                 }
                             }
-                            log_debug(@src(), "Unimplemented wfi", .{});
+                            log_debug(@src(), "TODO: Unimplemented wfi", .{});
                             self.pc +%= 4;
                         },
                         else => return error.UnkInst,

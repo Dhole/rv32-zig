@@ -25,6 +25,7 @@ const csr = struct {
         var names = [_][]const u8{""} ** 4096;
         names[0x100] = "sstatus";
         names[0x105] = "stvec";
+        names[0x106] = "scounteren";
 
         names[0x140] = "sscratch";
         names[0x141] = "sepc";
@@ -39,6 +40,7 @@ const csr = struct {
         names[0x303] = "mideleg";
         names[0x304] = "mie";
         names[0x305] = "mtvec";
+        names[0x306] = "mcounteren";
 
         names[0x312] = "medelegh";
 
@@ -404,7 +406,7 @@ pub fn inst_format(w: *Writer, addr: u32, inst: Inst) !void {
         },
         // U-Type
         .LUI, .AUIPC => {
-            const imm = inst.u_imm() >> 12;
+            const imm = inst.u_imm();
             try w.print(" {s}, 0x{x}", .{ reg[inst.rd()], imm });
         },
         // J-Type
