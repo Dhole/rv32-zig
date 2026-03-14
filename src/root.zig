@@ -926,12 +926,14 @@ pub fn Cpu(comptime cfg: Config) type {
                     error.CsrReadPriv => .illegal_inst,
                     error.CsrWritePriv => .illegal_inst,
                     error.CsrWriteRo => .illegal_inst,
+                    error.IllegalInst => .illegal_inst,
                     error.Ecall => switch (self.priv_mode) {
                         .M => .env_call_from_m_mode,
                         .U => .env_call_from_u_mode,
                         .S => .env_call_from_s_mode,
                         _ => unreachable,
                     },
+                    error.Ebreak => .breakpoint,
                     error.CheckInterrupt => {
                         self.check_interrupt();
                         return null;
@@ -1300,23 +1302,29 @@ pub fn Cpu(comptime cfg: Config) type {
                             return error.Ecall;
                         },
                         0b000000000001 => { // EBREAK
-                            log_debug(@src(), "TODO: Unimplemented ebreak", .{});
-                            self.pc +%= 4;
+                            self.fault_addr = self.pc;
+                            return error.Ebreak;
                         },
                         0b000000000010 => { // URET
                             log_debug(@src(), "TODO: Unimplemented uret", .{});
                             self.pc +%= 4;
                         },
                         0b000100000010 => { // SRET
-                            var sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
-                            self.priv_mode = @enumFromInt(sstatus.spp);
+                            var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                            if (self.priv_mode == .U or (self.priv_mode == .S and mstatus.tsr == 1)) {
+                                return error.IllegalInst;
+                            }
+                            self.priv_mode = @enumFromInt(mstatus.spp);
                             std.debug.print("DBG return to {s} mode\n", .{@tagName(self.priv_mode)});
-                            sstatus.sie = sstatus.spie;
-                            self.csr.set_sstatus(@bitCast(sstatus));
+                            mstatus.sie = mstatus.spie;
+                            self.csr.set_mstatus(@bitCast(mstatus));
                             self.pc = self.csr.regs[Csr.SEPC];
                             return error.CheckInterrupt;
                         },
                         0b001100000010 => { // MRET
+                            if (@intFromEnum(self.priv_mode) < @intFromEnum(PrivilegeMode.M)) {
+                                return error.IllegalInst;
+                            }
                             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
                             self.priv_mode = @enumFromInt(mstatus.mpp);
                             std.debug.print("DBG return to {s} mode\n", .{@tagName(self.priv_mode)});
@@ -1327,11 +1335,11 @@ pub fn Cpu(comptime cfg: Config) type {
                         },
                         0b000100000101 => { // WFI
                             if (self.priv_mode == PrivilegeMode.U) {
-                                return error.UnkInst;
+                                return error.IllegalInst;
                             } else if (self.priv_mode == PrivilegeMode.S) {
                                 const mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
                                 if (mstatus.tw == 1) {
-                                    return error.UnkInst;
+                                    return error.IllegalInst;
                                 }
                             }
                             log_debug(@src(), "TODO: Unimplemented wfi", .{});

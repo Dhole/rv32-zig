@@ -215,15 +215,15 @@ test "rv32mi" {
     const ops_str = [_][]const u8{
         "breakpoint",
         "csr",
-        // "illegal", // TODO
+        "illegal",
         // "instret_overflow", // TODO
         "lh-misaligned",
         "lw-misaligned",
         "ma_addr",
         "ma_fetch",
-        // "mcsr", // TODO
+        "mcsr",
         "pmpaddr",
-        // "sbreak", // TODO
+        "sbreak",
         "scall",
         "shamt",
         "sh-misaligned",
@@ -246,9 +246,9 @@ test "rv32si" {
         "csr",
         // "dirty", // TODO
         "ma_fetch",
-        // "sbreak", // TODO
+        "sbreak",
         "scall",
-        // "wfi", // TODO
+        "wfi",
     };
     for (ops_str) |op_str| {
         std.debug.print("> {s}\n", .{op_str});
@@ -262,7 +262,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32mi-p-illegal";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32si-p-sbreak";
 
     try test_exec_elf(allocator, elf_path);
 }
