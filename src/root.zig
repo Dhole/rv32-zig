@@ -321,6 +321,33 @@ pub const MTVec = packed struct {
     }
 };
 
+fn get_interrupt_code(v: u32) ?InterruptCode {
+    return if (v & (1 << @intFromEnum(InterruptCode.machine_ext)) != 0)
+        .machine_ext
+    else if (v & (1 << @intFromEnum(InterruptCode.machine_soft)) != 0)
+        .machine_soft
+    else if (v & (1 << @intFromEnum(InterruptCode.machine_timer)) != 0)
+        .machine_timer
+    else if (v & (1 << @intFromEnum(InterruptCode.supervisor_ext)) != 0)
+        .supervisor_ext
+    else if (v & (1 << @intFromEnum(InterruptCode.supervisor_soft)) != 0)
+        .supervisor_soft
+    else if (v & (1 << @intFromEnum(InterruptCode.supervisor_timer)) != 0)
+        .supervisor_timer
+    else
+        null;
+}
+
+const InterruptCode = enum(u6) {
+    supervisor_soft = 1,
+    machine_soft = 3,
+    supervisor_timer = 5,
+    machine_timer = 7,
+    supervisor_ext = 9,
+    machine_ext = 11,
+    counter_overflow = 13,
+};
+
 const ExceptionCode = enum(u6) {
     inst_addr_misaligned = 0,
     inst_access_fault = 1,
@@ -331,14 +358,32 @@ const ExceptionCode = enum(u6) {
     store_amo_addr_misaligned = 6,
     store_amo_access_fault = 7,
     env_call_from_u_mode = 8,
+    env_call_from_s_mode = 9,
     env_call_from_m_mode = 11,
     _,
 };
 
-pub const MCause = packed struct {
-    exception: ExceptionCode,
+pub const Cause = packed struct {
+    code: packed union {
+        exception: ExceptionCode,
+        interrupt: InterruptCode,
+        v: u6,
+    },
     reserved: u25,
     interrupt: u1,
+};
+
+pub const MIsa = packed struct {
+    extensions: u26,
+    reserved: u4,
+    mlx: u2,
+};
+
+pub const MISA_VAL: MIsa = .{
+    // 0:A, 8:I, 12:M, 18:S, 20:U
+    .extensions = 0b0_00001_01000_00100_01000_00001,
+    .reserved = 0,
+    .mlx = 1, // XLEN=32
 };
 
 const Privilege = struct {
@@ -358,6 +403,7 @@ const Csr = struct {
     const PMPADDR0: u12 = 0x3b0;
     // Machine Trap Setup
     const MSTATUS: u12 = 0x300;
+    const MISA: u12 = 0x301;
     const MEDELEG: u12 = 0x302;
     const MIDELEG: u12 = 0x303;
     const MIE: u12 = 0x304;
@@ -393,6 +439,7 @@ const Csr = struct {
         table[MNSTATUS] = .{ .mode = .M, .read_only = false };
 
         table[MSTATUS] = .{ .mode = .M, .read_only = false };
+        table[MISA] = .{ .mode = .M, .read_only = false };
         table[MEDELEG] = .{ .mode = .M, .read_only = false };
         table[MIDELEG] = .{ .mode = .M, .read_only = false };
         table[MIE] = .{ .mode = .M, .read_only = false };
@@ -432,6 +479,7 @@ const Csr = struct {
     fn init() Self {
         var regs = [_]u32{0} ** 4096;
         regs[MHARTID] = 0;
+        regs[MISA] = @bitCast(MISA_VAL);
         return .{
             .regs = regs,
         };
@@ -475,6 +523,15 @@ const Csr = struct {
                     else => {},
                 }
             },
+            MISA => {
+                self.regs[addr] = @bitCast(MISA_VAL);
+                return;
+            },
+            TSELECT, TDATA1, TDATA2, TCONTROL => {
+                // Hardwire debug/trigger CSRs to zero because we don't support them
+                self.regs[addr] = 0;
+                return;
+            },
             MSTATUS => {
                 self.set_mstatus(value);
                 return;
@@ -499,6 +556,13 @@ const Csr = struct {
         const v = sstatus & SSTATUS_MASK;
         self.regs[SSTATUS] = v;
         self.regs[MSTATUS] = (self.regs[MSTATUS] & ~SSTATUS_MASK) | v;
+    }
+
+    fn requires_check_interrupt(addr: u32) bool {
+        return switch (addr) {
+            MIP, MIE, MSTATUS, MIDELEG => true,
+            else => false,
+        };
     }
 };
 
@@ -583,6 +647,7 @@ pub fn Cpu(comptime cfg: Config) type {
         mem: Memory,
         // The last unknown instruction seen
         unk_inst: u32,
+        fault_addr: u32,
 
         const Self = @This();
 
@@ -594,6 +659,7 @@ pub fn Cpu(comptime cfg: Config) type {
                 .csr = Csr.init(),
                 .mem = Memory{ .inner = mem },
                 .unk_inst = 0,
+                .fault_addr = 0,
             };
         }
 
@@ -601,29 +667,66 @@ pub fn Cpu(comptime cfg: Config) type {
             self.mem.deinit();
         }
 
+        pub fn check_interrupt(self: *Self) void {
+            // (a) either the current privilege mode is M and the MIE bit in the mstatus
+            // register is set, or the current privilege mode has less privilege than
+            // M-mode
+            if (self.priv_mode == .M) {
+                const mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                if (mstatus.mie == 0) {
+                    return;
+                }
+            }
+            // (b) bit i is set in both mip and mie
+            // (c) if register mideleg exists, bit i is not set in mideleg.
+            const mip = self.csr.regs[Csr.MIP];
+            const mie = self.csr.regs[Csr.MIE];
+            const mideleg = self.csr.regs[Csr.MIDELEG];
+            if (get_interrupt_code(mip & mie & ~mideleg)) |interrupt| {
+                self.handle_interrupt(interrupt);
+            }
+        }
+
+        pub fn handle_interrupt(self: *Self, interrupt: InterruptCode) void {
+            std.debug.print("DBG interrupt {s}\n", .{@tagName(interrupt)});
+            self.handle_trap(Cause{
+                .code = .{ .interrupt = interrupt },
+                .reserved = 0,
+                .interrupt = 1,
+            }, 0);
+        }
+
         pub fn handle_exception(self: *Self, exception: ExceptionCode) void {
             std.debug.print("DBG exception {s}\n", .{@tagName(exception)});
             const tval = switch (exception) {
                 .load_addr_misaligned, .load_access_fault, .store_amo_addr_misaligned, .store_amo_access_fault => self.mem.inner.fault_addr,
-                .inst_addr_misaligned, .inst_access_fault, .breakpoint => self.pc,
+                .inst_addr_misaligned, .inst_access_fault, .breakpoint => self.fault_addr,
                 .illegal_inst => self.unk_inst,
                 else => 0,
             };
+            self.handle_trap(Cause{
+                .code = .{ .exception = exception },
+                .reserved = 0,
+                .interrupt = 0,
+            }, tval);
+        }
+
+        pub fn handle_trap(self: *Self, cause: Cause, tval: u32) void {
             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
             var tvec: MTVec = undefined;
             const medeleg = @as(u64, self.csr.regs[Csr.MEDELEG]) | @as(u64, self.csr.regs[Csr.MEDELEGH]) << 32;
-            if (self.priv_mode == .S and (medeleg & (@as(u64, 1) << @intFromEnum(exception))) != 0) {
+            if (self.priv_mode == .S and (medeleg & (@as(u64, 1) << cause.code.v)) != 0) {
                 self.csr.regs[Csr.SEPC] = self.pc;
-                self.csr.regs[Csr.SCAUSE] = @as(u32, @intFromEnum(exception));
+                self.csr.regs[Csr.SCAUSE] = @bitCast(cause);
                 self.csr.regs[Csr.STVAL] = tval;
                 mstatus.spp = @truncate(@intFromEnum(self.priv_mode));
-                mstatus.spie = mstatus.mie;
+                mstatus.spie = mstatus.sie;
                 mstatus.sie = 0;
                 tvec = @bitCast(self.csr.regs[Csr.STVEC]);
                 self.priv_mode = .S;
             } else {
                 self.csr.regs[Csr.MEPC] = self.pc;
-                self.csr.regs[Csr.MCAUSE] = @as(u32, @intFromEnum(exception));
+                self.csr.regs[Csr.MCAUSE] = @bitCast(cause);
                 self.csr.regs[Csr.MTVAL] = tval;
                 mstatus.mpp = @intFromEnum(self.priv_mode);
                 mstatus.mpie = mstatus.mie;
@@ -634,7 +737,7 @@ pub fn Cpu(comptime cfg: Config) type {
             const tvec_address = tvec.address();
             self.pc = switch (tvec.mode) {
                 .direct => tvec_address,
-                .vectored => tvec_address + 4 * @intFromEnum(exception),
+                .vectored => tvec_address + 4 * @as(u32, cause.code.v),
                 _ => unreachable,
             };
             self.csr.set_mstatus(@bitCast(mstatus));
@@ -660,8 +763,14 @@ pub fn Cpu(comptime cfg: Config) type {
                 const inst = Inst.init(word);
                 break :blk self.exec(inst);
             } else |err| switch (err) {
-                error.ReadMisaligned => .inst_addr_misaligned,
-                error.ReadInvalidAddr => .inst_access_fault,
+                error.ReadMisaligned => blk: {
+                    self.fault_addr = self.pc;
+                    break :blk .inst_addr_misaligned;
+                },
+                error.ReadInvalidAddr => blk: {
+                    self.fault_addr = self.pc;
+                    break :blk .inst_access_fault;
+                },
             };
             if (opt_exception) |exception| {
                 self.handle_exception(exception);
@@ -686,7 +795,12 @@ pub fn Cpu(comptime cfg: Config) type {
                     error.Ecall => switch (self.priv_mode) {
                         .M => .env_call_from_m_mode,
                         .U => .env_call_from_u_mode,
-                        else => @panic("Unsupported"),
+                        .S => .env_call_from_s_mode,
+                        _ => unreachable,
+                    },
+                    error.CheckInterrupt => {
+                        self.check_interrupt();
+                        return null;
                     },
                 };
             };
@@ -704,13 +818,15 @@ pub fn Cpu(comptime cfg: Config) type {
                     self.pc +%= 4;
                 },
                 0b1101111 => { // JAL
-                    self.regs[inst.rd()] = self.pc +% 4;
+                    const next = self.pc +% 4;
                     const imm: u32 = @bitCast(inst.signed_j_imm());
                     const pc = self.pc +% imm;
                     if (is_misaligned(u32, pc)) {
+                        self.fault_addr = pc;
                         return error.InstAddrMisaligned;
                     }
                     self.pc = pc;
+                    self.regs[inst.rd()] = next;
                 },
                 0b1100111 => switch (inst.funct3()) {
                     0b000 => { // JALR
@@ -718,6 +834,7 @@ pub fn Cpu(comptime cfg: Config) type {
                         const imm: u32 = @bitCast(inst.signed_i_imm());
                         const pc = (self.regs[inst.rs1()] +% imm) & ~@as(u32, 0b1);
                         if (is_misaligned(u32, pc)) {
+                            self.fault_addr = pc;
                             return error.InstAddrMisaligned;
                         }
                         self.pc = pc;
@@ -729,7 +846,12 @@ pub fn Cpu(comptime cfg: Config) type {
                     0b000 => { // BEQ
                         if (self.regs[inst.rs1()] == self.regs[inst.rs2()]) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -737,7 +859,12 @@ pub fn Cpu(comptime cfg: Config) type {
                     0b001 => { // BNE
                         if (self.regs[inst.rs1()] != self.regs[inst.rs2()]) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -747,7 +874,12 @@ pub fn Cpu(comptime cfg: Config) type {
                         const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
                         if (rs1 < rs2) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -757,7 +889,12 @@ pub fn Cpu(comptime cfg: Config) type {
                         const rs2: i32 = @bitCast(self.regs[inst.rs2()]);
                         if (rs1 >= rs2) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -765,7 +902,12 @@ pub fn Cpu(comptime cfg: Config) type {
                     0b110 => { // BLTU
                         if (self.regs[inst.rs1()] < self.regs[inst.rs2()]) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -773,7 +915,12 @@ pub fn Cpu(comptime cfg: Config) type {
                     0b111 => { // BGEU
                         if (self.regs[inst.rs1()] >= self.regs[inst.rs2()]) {
                             const imm: u32 = @bitCast(inst.signed_b_imm());
-                            self.pc +%= imm;
+                            const pc = self.pc +% imm;
+                            if (is_misaligned(u32, pc)) {
+                                self.fault_addr = pc;
+                                return error.InstAddrMisaligned;
+                            }
+                            self.pc = pc;
                         } else {
                             self.pc +%= 4;
                         }
@@ -1028,10 +1175,11 @@ pub fn Cpu(comptime cfg: Config) type {
                         },
                         0b000100000010 => { // SRET
                             var sstatus: MStatus = @bitCast(self.csr.regs[Csr.SSTATUS]);
-                            self.priv_mode = @enumFromInt(sstatus.mpp);
-                            sstatus.mie = sstatus.mpie;
+                            self.priv_mode = @enumFromInt(sstatus.spp);
+                            sstatus.sie = sstatus.spie;
                             self.csr.set_sstatus(@bitCast(sstatus));
                             self.pc = self.csr.regs[Csr.SEPC];
+                            return error.CheckInterrupt;
                         },
                         0b001100000010 => { // MRET
                             var mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
@@ -1039,8 +1187,17 @@ pub fn Cpu(comptime cfg: Config) type {
                             mstatus.mie = mstatus.mpie;
                             self.csr.set_mstatus(@bitCast(mstatus));
                             self.pc = self.csr.regs[Csr.MEPC];
+                            return error.CheckInterrupt;
                         },
                         0b000100000101 => { // WFI
+                            if (self.priv_mode == PrivilegeMode.U) {
+                                return error.UnkInst;
+                            } else if (self.priv_mode == PrivilegeMode.S) {
+                                const mstatus: MStatus = @bitCast(self.csr.regs[Csr.MSTATUS]);
+                                if (mstatus.tw == 1) {
+                                    return error.UnkInst;
+                                }
+                            }
                             log_debug(@src(), "Unimplemented wfi", .{});
                             self.pc +%= 4;
                         },
@@ -1054,6 +1211,9 @@ pub fn Cpu(comptime cfg: Config) type {
                         }
                         try self.csr.write(self.priv_mode, inst.csr(), rs1);
                         self.pc +%= 4;
+                        if (Csr.requires_check_interrupt(inst.csr())) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     0b010 => { // CSRRS,
                         const inst_rs1 = inst.rs1();
@@ -1061,10 +1221,15 @@ pub fn Cpu(comptime cfg: Config) type {
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
+                        var requires_check_interrupt = false;
                         if (inst_rs1 != 0) {
                             try self.csr.write(self.priv_mode, csr, v | rs1);
+                            requires_check_interrupt = Csr.requires_check_interrupt(csr);
                         }
                         self.pc +%= 4;
+                        if (requires_check_interrupt) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     0b011 => { // CSRRC,
                         const inst_rs1 = inst.rs1();
@@ -1072,10 +1237,15 @@ pub fn Cpu(comptime cfg: Config) type {
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
+                        var requires_check_interrupt = false;
                         if (inst_rs1 != 0) {
                             try self.csr.write(self.priv_mode, csr, v & ~rs1);
+                            requires_check_interrupt = Csr.requires_check_interrupt(csr);
                         }
                         self.pc +%= 4;
+                        if (requires_check_interrupt) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     0b101 => { // CSRRWI,
                         const csr = inst.csr();
@@ -1086,26 +1256,39 @@ pub fn Cpu(comptime cfg: Config) type {
                         const uimm = inst.csr_imm();
                         try self.csr.write(self.priv_mode, csr, uimm);
                         self.pc +%= 4;
+                        if (Csr.requires_check_interrupt(csr)) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     0b110 => { // CSRRSI,
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
                         const uimm = inst.csr_imm();
+                        var requires_check_interrupt = false;
                         if (uimm != 0) {
                             try self.csr.write(self.priv_mode, csr, v | uimm);
+                            requires_check_interrupt = Csr.requires_check_interrupt(csr);
                         }
                         self.pc +%= 4;
+                        if (requires_check_interrupt) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     0b111 => { // CSRRCI,
                         const csr = inst.csr();
                         const v = try self.csr.read(self.priv_mode, csr);
                         self.regs[inst.rd()] = v;
                         const uimm = inst.csr_imm();
+                        var requires_check_interrupt = false;
                         if (uimm != 0) {
                             try self.csr.write(self.priv_mode, csr, v & ~uimm);
+                            requires_check_interrupt = Csr.requires_check_interrupt(csr);
                         }
                         self.pc +%= 4;
+                        if (requires_check_interrupt) {
+                            return error.CheckInterrupt;
+                        }
                     },
                     else => return error.UnkInst,
                 },

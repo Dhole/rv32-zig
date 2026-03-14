@@ -213,14 +213,14 @@ test "rv32mi" {
     const allocator = gpa.allocator();
 
     const ops_str = [_][]const u8{
-        "breakpoint", // TODO
+        "breakpoint",
         "csr",
         "illegal", // TODO
         "instret_overflow", // TODO
         "lh-misaligned",
         "lw-misaligned",
         "ma_addr",
-        "ma_fetch", // TODO
+        "ma_fetch",
         "mcsr", // TODO
         "pmpaddr",
         "sbreak", // TODO
@@ -245,9 +245,9 @@ test "rv32si" {
     const ops_str = [_][]const u8{
         "csr",
         "dirty", // TODO
-        "ma_fetch", // TODO
+        "ma_fetch",
         "sbreak", // TODO
-        "scall", // TODO
+        "scall",
         "wfi", // TODO
     };
     for (ops_str) |op_str| {
@@ -262,7 +262,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32mi-p-ma_fetch";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32mi-p-illegal";
 
     try test_exec_elf(allocator, elf_path);
 }

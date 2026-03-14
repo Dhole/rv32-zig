@@ -20,6 +20,50 @@ const reg = [32][]const u8{
     "t3", "t4", "t5", "t6", // x28-x31, Temporaries
 };
 
+const csr = struct {
+    fn call() [4096][]const u8 {
+        var names = [_][]const u8{""} ** 4096;
+        names[0x100] = "sstatus";
+        names[0x105] = "stvec";
+
+        names[0x140] = "sscratch";
+        names[0x141] = "sepc";
+        names[0x142] = "scause";
+        names[0x143] = "stval";
+
+        names[0x180] = "satp";
+
+        names[0x300] = "mstatus";
+        names[0x301] = "misa";
+        names[0x302] = "medeleg";
+        names[0x303] = "mideleg";
+        names[0x304] = "mie";
+        names[0x305] = "mtvec";
+
+        names[0x312] = "medelegh";
+
+        names[0x340] = "mscratch";
+        names[0x341] = "mepc";
+        names[0x342] = "mcause";
+        names[0x343] = "mtval";
+        names[0x344] = "mip";
+
+        names[0x3a0] = "pmpcfg0";
+        names[0x3b0] = "pmpaddr0";
+
+        names[0x744] = "mnstatus";
+
+        names[0x7A0] = "tselect";
+        names[0x7A1] = "tdata1";
+        names[0x7A2] = "tdata2";
+        names[0x7A5] = "tcontrol";
+
+        names[0xf14] = "mhartid";
+
+        return names;
+    }
+}.call();
+
 const Opcode = enum {
     const Self = @This();
 
@@ -334,8 +378,19 @@ pub fn inst_format(w: *Writer, addr: u32, inst: Inst) !void {
             try w.print(" {s}, {s}, {s}", .{ reg[inst.rd()], reg[inst.rs1()], reg[inst.rs2()] });
         },
         // I-Type
-        .JALR, .LB, .LH, .LW, .LBU, .LHU, .ADDI, .SLTI, .SLTIU, .XORI, .ORI, .ANDI, .SLLI, .SRLI, .SRAI, .FENCE, .ECALL, .EBREAK, .CSRRW, .CSRRS, .CSRRC, .CSRRWI, .CSRRSI, .CSRRCI, .FENCEI, .URET, .SRET, .MRET, .WFI => {
+        .JALR, .LB, .LH, .LW, .LBU, .LHU, .ADDI, .SLTI, .SLTIU, .XORI, .ORI, .ANDI, .SLLI, .SRLI, .SRAI, .FENCE, .ECALL, .EBREAK, .FENCEI, .URET, .SRET, .MRET, .WFI => {
             try w.print(" {s}, {s}, {}", .{ reg[inst.rd()], reg[inst.rs1()], inst.signed_i_imm() });
+        },
+        // CSR
+        .CSRRW, .CSRRS, .CSRRC, .CSRRWI, .CSRRSI, .CSRRCI => {
+            try w.print(" {s}, {s}, ", .{ reg[inst.rd()], reg[inst.rs1()] });
+            const inst_csr = inst.csr();
+            const name = csr[inst_csr];
+            if (name.len != 0) {
+                try w.print("{s}", .{name});
+            } else {
+                try w.print("{x:0>3}", .{inst_csr});
+            }
         },
         // S-Type
         .SB, .SH, .SW => {
