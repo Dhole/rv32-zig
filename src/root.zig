@@ -232,15 +232,21 @@ pub const BasicMemory = struct {
         };
     }
 
-    pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
+    pub fn _read(self: *const Self, comptime T: type, addr: u32) ?T {
         if (self.rom_offset <= addr and addr < self.rom_offset + self.rom.len) {
             return buf_read(T, self.rom, addr - self.rom_offset);
         } else if (self.ram_offset <= addr and addr < self.ram_offset + self.ram.len) {
             return buf_read(T, self.ram, addr - self.ram_offset);
         }
-        debug.print("invalid read at {x:08}\n", .{addr});
-        self.fault_addr = addr;
-        return error.ReadInvalidAddr;
+        return null;
+    }
+
+    pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
+        return self._read(T, addr) orelse blk: {
+            debug.print("invalid read at {x:08}\n", .{addr});
+            self.fault_addr = addr;
+            break :blk error.ReadInvalidAddr;
+        };
     }
 
     pub fn write(self: *Self, comptime T: type, addr: u32, v: T) MemoryWriteError!void {
@@ -442,6 +448,11 @@ const Csr = struct {
     const MTVEC: u12 = 0x305;
     const MCOUNTEREN: u12 = 0x306;
     const MEDELEGH: u12 = 0x312;
+    // Machine Counter/Timers
+    const MINSTRET: u12 = 0xB02;
+    const MINSTRETH: u12 = 0xB82;
+    // Machine Counter Setup
+    const MCOUNTINHIBIT: u12 = 0x320;
     // Machine Trap Handling
     const MSCRATCH: u12 = 0x340;
     const MEPC: u12 = 0x341;
@@ -482,6 +493,11 @@ const Csr = struct {
         table[MTVEC] = .{ .mode = .M, .read_only = false };
         table[MCOUNTEREN] = .{ .mode = .M, .read_only = false };
         table[MEDELEGH] = .{ .mode = .M, .read_only = false };
+
+        table[MINSTRET] = .{ .mode = .M, .read_only = false };
+        table[MINSTRETH] = .{ .mode = .M, .read_only = false };
+
+        table[MCOUNTINHIBIT] = .{ .mode = .M, .read_only = false };
 
         table[MSCRATCH] = .{ .mode = .M, .read_only = false };
         table[MEPC] = .{ .mode = .M, .read_only = false };
@@ -702,6 +718,9 @@ pub fn MemoryInterface(comptime M: type) type {
     return struct {
         inner: M,
         const Self = @This();
+        pub fn _read(self: *const Self, comptime T: type, addr: u32) ?T {
+            return self.inner._read(T, addr);
+        }
         pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
             if (is_misaligned(T, addr)) {
                 return error.ReadMisaligned;
@@ -763,7 +782,7 @@ pub fn Cpu(comptime cfg: Config) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.mem.deinit();
+            _ = self;
         }
 
         pub fn check_interrupt(self: *Self) void {

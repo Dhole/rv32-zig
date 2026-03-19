@@ -76,6 +76,8 @@ fn test_exec_elf(allocator: Allocator, elf_path: []const u8) !void {
     else
         "a";
     var cpu = try test_cpu_init(allocator, mem_config);
+    defer cpu.mem.deinit();
+    defer cpu.deinit();
     try test_load_elf(allocator, &cpu, elf_path);
     // std.debug.print("RAM:\n{f}", .{MemoryFmt{ .mem = &cpu.mem, .offset = 0x80001000, .size = 0x100 }});
 
@@ -262,7 +264,7 @@ test "rv32_single" {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     const allocator = gpa.allocator();
 
-    const elf_path: []const u8 = "riscv-tests/isa/rv32si-p-sbreak";
+    const elf_path: []const u8 = "riscv-tests/isa/rv32mi-p-instret_overflow";
 
     try test_exec_elf(allocator, elf_path);
 }

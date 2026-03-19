@@ -44,6 +44,8 @@ const csr = struct {
 
         names[0x312] = "medelegh";
 
+        names[0x320] = "mcountinhibit";
+
         names[0x340] = "mscratch";
         names[0x341] = "mepc";
         names[0x342] = "mcause";
@@ -59,6 +61,9 @@ const csr = struct {
         names[0x7A1] = "tdata1";
         names[0x7A2] = "tdata2";
         names[0x7A5] = "tcontrol";
+
+        names[0xB02] = "minstret";
+        names[0xB82] = "minstreth";
 
         names[0xf14] = "mhartid";
 

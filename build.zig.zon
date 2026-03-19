@@ -35,6 +35,17 @@
         .elfy = .{
             .path = "../elfy.zig",
         },
+        .args = .{
+            .path = "../zig-args",
+        },
+        // .args = .{
+        //     .url = "git+https://github.com/ikskuh/zig-args?ref=master#e060ac80c244e9675471b6d213b22ddc83cc8f98",
+        //     .hash = "args-0.0.0-CiLiqo_RAADz2TiHUzG5-0Mk7IZHR-h1SZgUrb_k4c7d",
+        // },
+        .linenoize = .{
+            .url = "git+https://github.com/phiat/linenoize.git?ref=zig-0.15.2#037003638508c489d0ab70182fcb88e1111ff6c5",
+            .hash = "linenoize-0.1.1-J7HK8JPkAAAjd-RNhLkErMJQzzlE8J98yz7nOlcby2Ge",
+        },
     },
     .paths = .{
         "build.zig",
