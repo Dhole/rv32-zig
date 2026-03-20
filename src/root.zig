@@ -755,8 +755,8 @@ pub const Config = struct {
     mem_type: type,
 };
 
-pub fn Cpu(comptime cfg: Config) type {
-    const Memory = MemoryInterface(cfg.mem_type);
+pub fn Cpu(comptime _cfg: Config) type {
+    const Memory = MemoryInterface(_cfg.mem_type);
     return struct {
         regs: [32]u32,
         pc: u32,
@@ -766,6 +766,8 @@ pub fn Cpu(comptime cfg: Config) type {
         // The last unknown instruction seen
         unk_inst: u32,
         fault_addr: u32,
+
+        pub const cfg = _cfg;
 
         const Self = @This();
 
@@ -911,7 +913,19 @@ pub fn Cpu(comptime cfg: Config) type {
             return .{ opt_inst, opt_exception };
         }
 
+        pub fn step_n(comptime N: usize, self: *Self) void {
+            self.check_interrupt();
+            inline for (0..N) |_| {
+                self.step_no_interrupts();
+            }
+        }
+
         pub fn step(self: *Self) void {
+            self.check_interrupt();
+            self.step_no_interrupts();
+        }
+
+        fn step_no_interrupts(self: *Self) void {
             const opt_exception: ?ExceptionCode = if (self.mem.read(u32, self.pc)) |word| blk: {
                 const inst = Inst.init(word);
                 break :blk self.exec(inst);

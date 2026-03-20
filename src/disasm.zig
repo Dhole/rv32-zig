@@ -4,7 +4,7 @@ const Writer = std.Io.Writer;
 const root = @import("root.zig");
 const Inst = root.Inst;
 
-const reg = [32][]const u8{
+pub const reg = [32][]const u8{
     "zero", // x0, Hard-wired zero
     "ra", // x1, Return address
     "sp", // x2, Stack pointer
@@ -20,7 +20,7 @@ const reg = [32][]const u8{
     "t3", "t4", "t5", "t6", // x28-x31, Temporaries
 };
 
-const csr = struct {
+pub const csr = struct {
     fn call() [4096][]const u8 {
         var names = [_][]const u8{""} ** 4096;
         names[0x100] = "sstatus";

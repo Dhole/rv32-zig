@@ -13,6 +13,7 @@ const InstFmt = disasm.InstFmt;
 
 const debug = @import("debug.zig");
 const MemoryFmt = debug.MemoryFmt;
+const CpuFmt = debug.CpuFmt;
 
 const argsParser = @import("args");
 
@@ -142,9 +143,79 @@ const Cmd = union(enum) {
     disasm_at: struct { offset: u32, n: u32 },
     dump: struct { offset: u32, n: u32 },
     regs,
+    csr: struct { addr: u12 },
     help,
     unknown,
     nop,
+};
+
+const AddressWatcher = struct {
+    addrs: [32]u32,
+    len: usize,
+    mask: u32,
+
+    const Self = @This();
+    fn init() Self {
+        return .{
+            .addrs = .{0} ** 32,
+            .len = 0,
+            .mask = 0,
+        };
+    }
+    fn add(self: *Self, addr: u32) !void {
+        if (self.matches(addr)) {
+            return error.AddressWatcherDuplicate;
+        }
+        if (self.len == self.addrs.len) {
+            return error.AddressWatcherFull;
+        }
+        self.addrs[self.len] = addr;
+        self.len += 1;
+        self.update_mask();
+    }
+    fn del(self: *Self, addr: u32) !void {
+        for (0..self.len) |i| {
+            if (addr == self.addrs[i]) {
+                @memmove(self.addrs[i .. self.len - 1], self.addrs[i + 1 .. self.len]);
+                self.len -= 1;
+                self.update_mask();
+                return;
+            }
+        }
+        return error.AddressWatcherAddrNotFound;
+    }
+    fn matches(self: *Self, addr: u32) bool {
+        if ((addr & self.mask) != addr) {
+            return false;
+        }
+        for (0..self.len) |i| {
+            if (addr == self.addrs[i]) {
+                return true;
+            }
+        }
+        return false;
+    }
+    fn update_mask(self: *Self) void {
+        var mask: u32 = 0;
+        for (0..self.len) |i| {
+            mask |= self.addrs[i];
+        }
+        self.mask = mask;
+    }
+};
+
+const State = struct {
+    trace_inst: bool,
+    breakpoints: AddressWatcher,
+    pause: bool,
+
+    fn init() State {
+        return .{
+            .trace_inst = false,
+            .breakpoints = AddressWatcher.init(),
+            .pause = false,
+        };
+    }
 };
 
 fn run(allocator: Allocator, glob_opts: Options, cpu: *Cpu) !void {
@@ -178,11 +249,12 @@ fn run(allocator: Allocator, glob_opts: Options, cpu: *Cpu) !void {
     var ln = Linenoise.init(allocator);
     defer ln.deinit();
 
-    var writer_buf: [128]u8 = undefined;
+    var writer_buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&writer_buf);
     var w = &stdout.interface;
     defer w.flush() catch unreachable;
 
+    var state = State.init();
     var last_cmd: Cmd = .nop;
     // loop:
     while (true) {
@@ -190,8 +262,9 @@ fn run(allocator: Allocator, glob_opts: Options, cpu: *Cpu) !void {
         var buf_input: ?[]const u8 = undefined;
         var free_input = false;
         if (init_cmd_it.next()) |cmd_str| {
-            try w.print("$> {s}\n", .{cmd_str});
-            buf_input = cmd_str;
+            const cmd_str_clean = std.mem.trimStart(u8, cmd_str, " \n");
+            try w.print("$> {s}\n", .{cmd_str_clean});
+            buf_input = cmd_str_clean;
         } else {
             buf_input = try ln.linenoise("> ");
             free_input = true;
@@ -214,24 +287,43 @@ fn run(allocator: Allocator, glob_opts: Options, cpu: *Cpu) !void {
 
         switch (cmd) {
             .trace_inst => |a| {
-                _ = a;
-                // cpu.dbg.trace_inst = a.v;
+                state.trace_inst = a.v;
             },
             .trace_io => |a| {
                 _ = a;
                 // cpu.dbg.trace_io = a.v;
             },
             .step => |a| {
-                _ = a;
-                // for (0..a.n) |_| {
-                //     _ = cpu.step();
-                // }
+                for (0..a.n) |_| {
+                    if (state.trace_inst) {
+                        try disasm_block(cpu, w, cpu.pc, 1);
+                        try w.flush();
+                    }
+                    if (!state.pause and state.breakpoints.matches(cpu.pc)) {
+                        try w.print("hit breakpoint at {x:0>8}", .{cpu.pc});
+                        state.pause = true;
+                        break;
+                    } else {
+                        state.pause = false;
+                    }
+                    cpu.step();
+                }
             },
             .@"continue" => {
-                // const exit = run(&cpu);
-                // if (exit) {
-                //     return;
-                // }
+                while (true) {
+                    if (state.trace_inst) {
+                        try disasm_block(cpu, w, cpu.pc, 1);
+                        try w.flush();
+                    }
+                    if (!state.pause and state.breakpoints.matches(cpu.pc)) {
+                        try w.print("hit breakpoint at {x:0>8}\n", .{cpu.pc});
+                        state.pause = true;
+                        break;
+                    } else {
+                        state.pause = false;
+                    }
+                    cpu.step();
+                }
             },
             .disasm => |a| {
                 try disasm_block(cpu, w, cpu.pc, a.n);
@@ -242,33 +334,32 @@ fn run(allocator: Allocator, glob_opts: Options, cpu: *Cpu) !void {
             .dump => |a| {
                 try dump(cpu, w, a.offset, a.n);
             },
-            .@"break" => |a| {
-                _ = a;
-                // for (cpu.dbg.breaks.items) |addr| {
-                //     if (addr == a.addr) {
-                //         try w.print("ERR: Duplicate breakpoint\n", .{});
-                //         continue :loop;
-                //     }
-                // }
-                // try cpu.dbg.breaks.append(a.addr);
+            .@"break" => |a| state.breakpoints.add(a.addr) catch |err| {
+                switch (err) {
+                    error.AddressWatcherDuplicate => try w.print("ERR: Duplicate breakpoint\n", .{}),
+                    error.AddressWatcherFull => try w.print("ERR: Breakpoint list full\n", .{}),
+                }
             },
-            .delete_break => |a| {
-                _ = a;
-                // for (cpu.dbg.breaks.items, 0..) |addr, i| {
-                //     if (addr == a.addr) {
-                //         _ = cpu.dbg.breaks.orderedRemove(i);
-                //         continue :loop;
-                //     }
-                // }
-                // try w.print("ERR: Breakpoint not found\n", .{});
+            .delete_break => |a| state.breakpoints.del(a.addr) catch |err| {
+                switch (err) {
+                    error.AddressWatcherAddrNotFound => try w.print("ERR: Breakpoint not found\n", .{}),
+                }
             },
             .info_breaks => {
-                // for (cpu.dbg.breaks.items, 0..) |addr, i| {
-                //     try w.print("break {d} at {x:0>8}\n", .{ i, addr });
-                // }
+                const breakpoints = &state.breakpoints;
+                for (0..breakpoints.len) |i| {
+                    try w.print("break {d} at {x:0>8}\n", .{ i, breakpoints.addrs[i] });
+                }
             },
             .regs => {
-                // try cpu.format_regs(w);
+                try w.print("{f}\n", .{CpuFmt(Cpu.cfg){ .cpu = cpu }});
+            },
+            .csr => |a| {
+                var name = disasm.csr[a.addr];
+                if (name.len == 0) {
+                    name = "?";
+                }
+                try w.print("{x:0>3} ({s}): {x:0>8}\n", .{ a.addr, name, cpu.csr.regs[a.addr] });
             },
             .help => try print_help(w),
             .unknown => {
@@ -332,8 +423,12 @@ fn parse_bool(it: anytype) !bool {
 
 // it: *std.mem.TokenIterator
 fn parse_word(it: anytype) !u32 {
+    return parse_hex(u32, it);
+}
+
+fn parse_hex(comptime T: type, it: anytype) !T {
     const arg = it.next() orelse return error.MissingArgument;
-    return std.fmt.parseInt(u32, arg, 16) catch error.InvalidArgument;
+    return std.fmt.parseInt(T, arg, 16) catch error.InvalidArgument;
 }
 
 // it: *std.mem.TokenIterator
@@ -351,6 +446,9 @@ fn parse_input(input: []const u8) !?Cmd {
         return .help;
     } else if (eql(u8, cmd, "r")) {
         return .regs;
+    } else if (eql(u8, cmd, "csr")) {
+        const addr = try parse_hex(u12, &it);
+        return .{ .csr = .{ .addr = addr } };
     } else if (eql(u8, cmd, "c")) {
         return .@"continue";
     } else if (eql(u8, cmd, "ib")) {
