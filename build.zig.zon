@@ -32,12 +32,6 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .elfy = .{
-            .path = "../elfy.zig",
-        },
-        .args = .{
-            .path = "../zig-args",
-        },
         // .args = .{
         //     .url = "git+https://github.com/ikskuh/zig-args?ref=master#e060ac80c244e9675471b6d213b22ddc83cc8f98",
         //     .hash = "args-0.0.0-CiLiqo_RAADz2TiHUzG5-0Mk7IZHR-h1SZgUrb_k4c7d",
@@ -45,6 +39,14 @@
         .linenoize = .{
             .url = "git+https://github.com/phiat/linenoize.git?ref=zig-0.15.2#037003638508c489d0ab70182fcb88e1111ff6c5",
             .hash = "linenoize-0.1.1-J7HK8JPkAAAjd-RNhLkErMJQzzlE8J98yz7nOlcby2Ge",
+        },
+        .elfy = .{
+            .url = "git+https://github.com/Dhole/elfy.zig?ref=fix/prog-flag#830365755abecdd264c0119dc1b80fd90ff6d462",
+            .hash = "elfy-0.1.0-BML8MjsiAQD77pcKzbbBGw7V5JxdLLv61CBKwa6GMVfZ",
+        },
+        .args = .{
+            .url = "git+https://github.com/Dhole/zig-args?ref=feat/print-help-verb#c3ed220c18fe2b33dd47d4b71bd1ae3806174d06",
+            .hash = "args-0.0.0-CiLiqvvfAAAM3smSSA0GGjCI483ftWnhZ_FFo4WjNELF",
         },
     },
     .paths = .{
