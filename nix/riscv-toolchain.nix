@@ -17,6 +17,8 @@ stdenv.mkDerivation rec {
 
   nativeBuildInputs = with pkgs; [
     curl
+    perl
+    python3
     gawk
     texinfo
     bison
@@ -36,6 +38,11 @@ stdenv.mkDerivation rec {
     "--with-arch=${arch}"
     "--with-abi=ilp32"
   ];
+  postConfigure = ''
+    # nixpkgs will set those value to bare string "ar", "objdump"...
+    # however we are cross-compiling, we must let $CC to determine which bintools to use.
+    unset AR AS LD OBJCOPY OBJDUMP
+  '';
   hardeningDisable = [ "all" ];
   enableParallelBuilding = true;
   dontPatchELF = true;

@@ -1,0 +1,35 @@
+❯ nix develop --cores 8
+warning: Git tree '/home/dev/git/rv32-zig' is dirty
+error: builder for '/nix/store/32pfs35n1qbklza2j2b3m0j1lqsv3ikm-riscv-rv32ima-toolchain-2026.03.13.drv'
+ failed with exit code 2;
+       last 25 log lines:
+       >       | ^
+       > compilation terminated.
+       > make[2]: *** [Makefile:1210: trans-mem.o] Error 1
+       > ../.././gcc/gcc/sanopt.cc:1436:1: fatal error: error writing to /build/ccwAH20p.s: No space le
+ft on device
+       >  1436 | }
+       >       | ^
+       > compilation terminated.
+       > In file included from ../.././gcc/gcc/ubsan.cc:2593:
+       > ./gt-ubsan.h:189:2: fatal error: error writing to /build/ccdlgFZ4.s: No space left on device
+       >   189 | };
+       >       |  ^
+       > compilation terminated.
+       > make[2]: *** [Makefile:1210: sanopt.o] Error 1
+       > make[2]: *** [Makefile:1210: ubsan.o] Error 1
+       > In file included from ../.././gcc/gcc/asan.cc:4929:
+       > ./gt-asan.h:89:2: fatal error: error writing to /build/ccw1n4XU.s: No space left on device
+       >    89 | };
+       >       |  ^
+       > compilation terminated.
+       > make[2]: *** [Makefile:1210: asan.o] Error 1
+       > rm gfdl.pod gcc.pod gcov-dump.pod gcov-tool.pod fsf-funding.pod gpl.pod cpp.pod gcov.pod lto-d
+ump.pod
+       > make[2]: Leaving directory '/build/source/build-gcc-linux-stage1/gcc'
+       > make[1]: *** [Makefile:4693: all-gcc] Error 2
+       > make[1]: Leaving directory '/build/source/build-gcc-linux-stage1'
+       > make: *** [Makefile:475: stamps/build-gcc-linux-stage1] Error 2
+       For full logs, run 'nix log /nix/store/32pfs35n1qbklza2j2b3m0j1lqsv3ikm-riscv-rv32ima-toolchain-
+2026.03.13.drv'.
+
