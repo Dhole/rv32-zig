@@ -1,11 +1,13 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 const root = @import("root.zig");
 // const Inst = root.Inst;
-const MemoryInterface = root.MemoryInterface;
+
 const Cpu = root.Cpu;
 const Config = root.Config;
+const MemoryInterface = root.MemoryInterface;
 
 const disasm = @import("disasm.zig");
 
