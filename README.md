@@ -8,5 +8,5 @@ make
 
 Run tests:
 ```
-zig test src/tests.zig --test-filter rv32ui
+zig build riscv-tests -Dtest-filter=rv32ui
 ```

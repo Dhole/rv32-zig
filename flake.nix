@@ -4,25 +4,44 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    zig-overlay.url = "github:mitchellh/zig-overlay";
   };
 
-  outputs = { nixpkgs, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils, zig-overlay }:
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (system:
       let
-        pkgs = import nixpkgs { inherit system; };
-        riscv32 = pkgs.pkgsCross.riscv32.riscv32-unknown-elf;
+        pkgs = nixpkgs.legacyPackages.${system};
+        zig  = zig-overlay.packages.${system}."0.15.2";
+
+        baremetal = import nixpkgs {
+          inherit system;
+          crossSystem = {
+            config = "riscv32-none-elf";
+            libc   = "newlib";
+            gcc    = { arch = "rv32ima"; abi = "ilp32"; };
+          };
+        };
+
+        linux = import nixpkgs {
+          inherit system;
+          crossSystem = {
+            config = "riscv32-unknown-linux-gnu";
+            libc   = "glibc";
+            gcc    = { arch = "rv32ima"; abi = "ilp32"; };
+          };
+        };
+
+        packages = {
+          baremetal-gcc      = baremetal.buildPackages.gcc;
+          baremetal-binutils = baremetal.buildPackages.binutils;
+          linux-gcc          = linux.buildPackages.gcc;
+          linux-binutils     = linux.buildPackages.binutils;
+        };
       in {
+        inherit packages;
+
         devShells.default = pkgs.mkShell {
-          hardeningDisable = [ "relro" "bindnow" ];
-          # NOTE: These toolchains are compiled for rv32imac.  To restrict the ISA call gcc with `-march=rv32ima -mabi=ilp32`
-          packages = [
-            # Baremetal toolchain with newlib
-            pkgs.pkgsCross.riscv32-embedded.gcc
-            pkgs.pkgsCross.riscv32-embedded.binutils
-            # pkgs.pkgsCross.riscv32-embedded.newlib
-            # Linux toolchain with glibc
-            # TODO
-          ];
+          packages = builtins.attrValues packages ++ [ zig ];
         };
       }
     );
