@@ -1,5 +1,5 @@
 # RISCV_PREFIX = riscv64-elf-
-RISCV_PREFIX = riscv64-none-elf-
+RISCV_PREFIX = riscv32-none-elf-
 # RV32UI = $(wildcard riscv-tests/isa/rv32ui/*.S)
 TESTS = riscv-tests/isa
 RV32UI = $(patsubst $(TESTS)/rv32ui/%.S,%,$(wildcard $(TESTS)/rv32ui/*.S))
@@ -35,3 +35,7 @@ riscv-tests-rv32si:
 	git submodule update --init --recursive
 	XLEN=32 RISCV_PREFIX=$(RISCV_PREFIX) make -C riscv-tests/isa rv32si
 	$(foreach var,$(RV32SI),$(RISCV_PREFIX)objcopy -O binary $(TESTS)/rv32si-p-$(var) $(TESTS)/rv32si-p-$(var).bin;)
+
+clean:
+	XLEN=32 RISCV_PREFIX=$(RISCV_PREFIX) make -C riscv-tests/isa clean
+	rm $(TESTS)/rv32*-p-*.bin

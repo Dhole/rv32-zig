@@ -5,8 +5,12 @@ const Writer = std.Io.Writer;
 
 const root = @import("root.zig");
 const Inst = root.Inst;
-const Cpu = root.BasicCpu;
-const Memory = root.BasicMemory;
+const Config = root.Config;
+
+const MemoryReadError = root.MemoryReadError;
+const MemoryWriteError = root.MemoryWriteError;
+const buf_read = root.buf_read;
+const buf_write = root.buf_write;
 
 const disasm = @import("disasm.zig");
 const InstFmt = disasm.InstFmt;
@@ -20,6 +24,76 @@ const argsParser = @import("args");
 const elfy = @import("elfy");
 
 const Linenoise = @import("linenoize").Linenoise;
+
+pub fn FlatMemory(comptime N: usize) type {
+    return struct {
+        allocator: Allocator,
+        offset: u32,
+        mem: []u8,
+        reservation_addr: u32,
+        reservation_valid: bool,
+        // The last fault address seen
+        fault_addr: u32,
+
+        const Self = @This();
+
+        pub fn init(allocator: Allocator, offset: u32) !Self {
+            const mem = try allocator.alloc(u8, N);
+            return Self{
+                .allocator = allocator,
+                .offset = offset,
+                .mem = mem,
+                .reservation_addr = 0,
+                .reservation_valid = false,
+                .fault_addr = 0,
+            };
+        }
+
+        pub fn _read(self: *const Self, comptime T: type, addr: u32) ?T {
+            if (self.offset <= addr and addr < self.offset + self.mem.len) {
+                return buf_read(T, self.mem, addr - self.offset);
+            }
+            return null;
+        }
+
+        pub fn read(self: *Self, comptime T: type, addr: u32) MemoryReadError!T {
+            return self._read(T, addr) orelse blk: {
+                std.debug.print("invalid read at {x:08}\n", .{addr});
+                self.fault_addr = addr;
+                break :blk error.ReadInvalidAddr;
+            };
+        }
+
+        pub fn write(self: *Self, comptime T: type, addr: u32, v: T) MemoryWriteError!void {
+            if ((addr & ~@as(u32, 0b11)) == self.reservation_addr) {
+                self.reservation_valid = false;
+            }
+            if (self.offset <= addr and addr < self.offset + self.mem.len) {
+                return buf_write(T, self.mem, addr - self.offset, v);
+            }
+            std.debug.print("invalid write at {x:08}\n", .{addr});
+            self.fault_addr = addr;
+            return error.WriteInvalidAddr;
+        }
+
+        pub fn reserve(self: *Self, addr: u32) void {
+            self.reservation_addr = addr;
+            self.reservation_valid = true;
+        }
+        pub fn validate_reservation(self: *Self, addr: u32) bool {
+            const valid = self.reservation_addr == addr and self.reservation_valid;
+            self.reservation_valid = false;
+            return valid;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.allocator.free(self.mem);
+        }
+    };
+}
+
+const Memory = FlatMemory(32 * 1024 * 1024);
+const Cpu = root.Cpu(Config{ .mem_type = Memory });
 
 const Options = struct {
     cmd: ?[]const u8 = null,
@@ -88,7 +162,7 @@ pub fn main() !void {
 }
 
 fn run_elf(allocator: Allocator, glob_opts: Options, elf_path: []const u8) !void {
-    const mem = try Memory.init(allocator, 0x80000000, 0x1000, 0x80001000, 0x8000);
+    const mem = try Memory.init(allocator, 0x80000000);
     var cpu = Cpu.init(mem);
     defer cpu.mem.deinit();
     defer cpu.deinit();
@@ -102,10 +176,8 @@ fn load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
 
     cpu.pc = @intCast(elf.getHeader().getEntryPoint());
 
-    const rom_addr = cpu.mem.inner.rom_offset;
-    const rom_size = cpu.mem.inner.rom.len;
-    const ram_addr = cpu.mem.inner.ram_offset;
-    const ram_size = cpu.mem.inner.ram.len;
+    const mem_addr = cpu.mem.inner.offset;
+    const mem_size = cpu.mem.inner.mem.len;
 
     var segments = try elf.getIterator(elfy.ElfProgram);
     while (try segments.next()) |segment| {
@@ -115,16 +187,18 @@ fn load_elf(allocator: Allocator, cpu: *Cpu, elf_path: []const u8) !void {
         const vaddr = segment.getVirtualAddress();
         const vsize = segment.getMemorySize();
         const flags = segment.getFlags();
-        if (!flags.write() & ((rom_addr <= vaddr) & (vaddr + vsize <= rom_addr + rom_size))) {
+        if (!flags.write() & ((mem_addr <= vaddr) & (vaddr + vsize <= mem_addr + mem_size))) {
+            // READ
             const data = try elf.getProgramData(segment);
-            const offset = vaddr - rom_addr;
-            @memset(cpu.mem.inner.rom[offset .. offset + vsize], 0);
-            @memcpy(cpu.mem.inner.rom[offset .. offset + data.len], data);
-        } else if (flags.write() & ((ram_addr <= vaddr) & (vaddr + vsize <= ram_addr + ram_size))) {
+            const offset = vaddr - mem_addr;
+            @memset(cpu.mem.inner.mem[offset .. offset + vsize], 0);
+            @memcpy(cpu.mem.inner.mem[offset .. offset + data.len], data);
+        } else if (flags.write() & ((mem_addr <= vaddr) & (vaddr + vsize <= mem_addr + mem_size))) {
+            // WRITE
             const data = try elf.getProgramData(segment);
-            const offset = vaddr - ram_addr;
-            @memset(cpu.mem.inner.ram[offset .. offset + vsize], 0);
-            @memcpy(cpu.mem.inner.ram[offset .. offset + data.len], data);
+            const offset = vaddr - mem_addr;
+            @memset(cpu.mem.inner.mem[offset .. offset + vsize], 0);
+            @memcpy(cpu.mem.inner.mem[offset .. offset + data.len], data);
         } else {
             std.debug.panic("Unexpected segment config", .{});
         }

@@ -10,7 +10,7 @@ make
 
 Run tests:
 ```
-zig test src/tests.zig --test-filter rv32ui
+zig build riscv-tests -Dtest-filter=rv32ui
 ```
 
 My `/tmp` is tmpfs with 16GB, which is not enough to store all the build artifacts, so I set `TMPDIR` to a disk path:
