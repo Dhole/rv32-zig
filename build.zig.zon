@@ -40,15 +40,15 @@
         //     .path = "../zig-args",
         // },
         .args = .{
-            .url = "git+https://github.com/ikskuh/zig-args.git#cef615b6762990466d88db126f762f1cabe327e8",
+            .url = "git+https://github.com/ikskuh/zig-args?ref=master#cef615b6762990466d88db126f762f1cabe327e8",
             .hash = "args-0.0.0-CiLiqvvfAAAM3smSSA0GGjCI483ftWnhZ_FFo4WjNELF",
         },
         // .elfy = .{
         //     .path = "../elfy.zig",
         // },
         .elfy = .{
-            .url = "git+https://github.com/dhole/elfy.zig.git?ref=fix/prog-flag#830365755abecdd264c0119dc1b80fd90ff6d462",
-            .hash = "elfy-0.1.0-BML8MjsiAQD77pcKzbbBGw7V5JxdLLv61CBKwa6GMVfZ",
+            .url = "git+https://github.com/gashap0n/elfy.zig#cfa0e94cbda59fedcb48d24e7a93d0401b846f25",
+            .hash = "elfy-0.1.0-BML8MhAiAQCACQIn5Dh-U2i9HoK0nKdAlpO1RW8vuYSF",
         },
     },
     .paths = .{

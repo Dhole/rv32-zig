@@ -4,7 +4,9 @@ Build the riscv tests:
 ```
 # My machine has 32 threads and ram can get scarce by running 32 jobs in
 # parallel, so I set the `--core` flags to that make only uses 8 jobs.
-TMPDIR=/var/tmp nix develop --cores 8
+# Since the flake has multiple derivations that require compilation setting I
+# set `--max-jobs` to 1 so that there's a single one being built at a time.
+nix develop --max-jobs 1 --cores 8
 make
 ```
 
