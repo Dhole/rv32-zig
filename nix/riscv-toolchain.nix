@@ -3,7 +3,7 @@
   arch
 }:
 
-stdenv.mkDerivation rec {
+pkgs.stdenvNoCC.mkDerivation rec {
   pname    = "riscv-${arch}-toolchain";
   version = "2026.03.13";
   src     = pkgs.fetchFromGitHub {
@@ -12,10 +12,13 @@ stdenv.mkDerivation rec {
     rev = "refs/tags/${version}";
     sha256 = "sha256-LR+cOFze3O0nkxoV+kpeYBkmaL5df4JzLxDuZPMNMuY=";
     fetchSubmodules = true;
-    leaveDotGit = true;
   };
 
   nativeBuildInputs = with pkgs; [
+    gcc binutils
+    which
+    automake
+    autoconf
     curl
     perl
     python3
@@ -28,21 +31,21 @@ stdenv.mkDerivation rec {
     flock
   ];
   buildInputs = with pkgs; [
+    zlib
     libmpc
     mpfr
     gmp
     expat
   ];
 
-  configureFlags   = [
+  bits = if lib.hasPrefix "rv32" arch then "32" else "64";
+  abi  = if bits == "32" then "ilp32" else "lp64";
+  configureFlags = [
+    "--prefix=${placeholder "out"}"
     "--with-arch=${arch}"
-    "--with-abi=ilp32"
+    "--with-abi=${abi}"
   ];
-  postConfigure = ''
-    # nixpkgs will set those value to bare string "ar", "objdump"...
-    # however we are cross-compiling, we must let $CC to determine which bintools to use.
-    unset AR AS LD OBJCOPY OBJDUMP
-  '';
+
   hardeningDisable = [ "all" ];
   enableParallelBuilding = true;
   dontPatchELF = true;
@@ -55,10 +58,28 @@ stdenv.mkDerivation rec {
     "GLIBC_SRC_GIT="
     "GDB_SRC_GIT="
     "NEWLIB_SRC_GIT="
-
-    # Install to nix out dir
-    "INSTALL_DIR=${placeholder "out"}"
   ];
 
-  installTargets = "newlib linux";
+
+  buildPhase = ''
+    runHook preBuild
+
+    echo "DBG"
+    echo $OBJCOPY
+
+    unset AR AS LD OBJCOPY OBJDUMP
+
+    echo $OBJCOPY
+
+    false
+    export PATH=${placeholder "out"}/bin:$PATH
+    make -j$NIX_BUILD_CORES $makeFlags newlib
+    make -j$NIX_BUILD_CORES $makeFlags linux
+
+    runHook postBuild
+  '';
+
+  # riscv-gnu-toolchain installs everything in the build rules, so we just do
+  # nothing here
+  installPhase = "true";
 }

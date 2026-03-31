@@ -1,21 +1,52 @@
 {
-  description = "RV32 dev environment";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
+  outputs = { self, nixpkgs }: let
+    pkgs = import nixpkgs { system = "x86_64-linux"; };
 
-  outputs = { self, nixpkgs }:
-  let
-    system = "x86_64-linux";
-    pkgs = import nixpkgs { inherit system; };
-    toolchain = pkgs.callPackage ./nix/riscv-toolchain.nix {
-      arch = "rv32ima";
+    # Bare-metal: riscv32, no OS
+    pkgsBare = import nixpkgs {
+      system = "x86_64-linux";
+      crossSystem = {
+        config   = "riscv32-none-elf";
+        libc     = "newlib";
+        gcc = {
+          arch = "rv32ima";
+          abi  = "ilp32";
+        };
+      };
     };
+
+    # GNU/Linux target
+    pkgsLinux = import nixpkgs {
+      system = "x86_64-linux";
+      crossSystem = {
+        config = "riscv32-unknown-linux-gnu";
+        gcc = {
+          arch = "rv32ima";
+          abi  = "ilp32";
+        };
+      };
+    };
+
   in {
-    packages.${system}.default = toolchain;
-    devShells.${system}.default = pkgs.mkShell {
-      buildInputs = [
-        toolchain
+    devShells.x86_64-linux = {
+
+    default = pkgs.mkShell {
+      name = "rv32ima";
+      hardeningDisable = [ "relro" "bindnow" ];
+      nativeBuildInputs = [
+        # Baremetal
+        pkgsBare.buildPackages.gcc
+        pkgsBare.buildPackages.binutils
+        pkgsBare.buildPackages.gdb
+
+        # Linux
+        pkgsLinux.buildPackages.gcc
+        pkgsLinux.buildPackages.binutils
+        pkgsLinux.buildPackages.gdb
       ];
+    };
     };
   };
 }
